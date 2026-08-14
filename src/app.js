@@ -10,7 +10,7 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawPhotons, drawSpectrum } from "./plots.js";
+import { drawAll, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 
 // --- nuclear data ---------------------------------------------------------
 
@@ -760,6 +760,18 @@ async function main() {
   });
 
   $("run").addEventListener("click", run);
+  // A scale toggle redraws only the chart it belongs to. The spectrum is drawn
+  // from the form, the rest from the last results, so there is nothing to
+  // redraw for those until a run has happened.
+  wireAxisScales((id) => {
+    if (id === "plot-spectrum") {
+      refreshSpectrum();
+    } else if (state.results) {
+      if (id === "plot-photons") drawPhotons(state.results, Number($("photon-step").value));
+      else drawAll(state.results);
+    }
+  });
+
   // The palettes are separately validated per theme rather than flipped, so a
   // theme change rebuilds the charts. The spectrum is up before any run, which
   // is exactly when someone is most likely to switch.
