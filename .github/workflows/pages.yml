@@ -1,0 +1,86 @@
+name: Pages
+
+# Builds the single-file page and publishes it. The Pages source must be set to
+# "GitHub Actions" rather than a branch: the repository root has no index.html,
+# because the page only exists after `node build.mjs` inlines the wasm and
+# plotly into it, and dist/ is not committed.
+#
+# No secrets. The solver is committed under vendor/, matching core, which
+# commits its own wasm to python/yamc/_wasm rather than building it in CI, so
+# this workflow needs nothing beyond the default GITHUB_TOKEN. Refreshing the
+# solver is `wasm-pack build` in core and a copy into vendor/, recorded in
+# vendor/CORE_COMMIT -- see the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, queued rather than cancelled, so a merge is never
+# published over by an older run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Build
+        run: |
+          node build.mjs | tee build.log
+          {
+            cat build.log
+            echo
+            echo "solver built from core $(cat vendor/CORE_COMMIT)"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify it runs and is self-contained
+        # Chromium is not the point; a page that deploys and cannot solve is.
+        #
+        # This also carries the self-contained check. Grepping the bundle for a
+        # vendor/ fetch does not work: the dev fallback is a runtime branch that
+        # never fires once the placeholders are substituted, but its text is
+        # still inlined, so the grep always matches. verify.mjs watches what the
+        # page actually requests instead.
+        run: |
+          ls -la dist/
+          npm ci
+          npx playwright install --with-deps chromium
+          node verify.mjs
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: page
+          path: |
+            dist/index.html
+            verify-*.png
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

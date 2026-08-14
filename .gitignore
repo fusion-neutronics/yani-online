@@ -1,0 +1,12 @@
+# Build output. `node build.mjs` regenerates it from src/ and vendor/.
+dist/
+
+# vendor/yani_wasm* IS committed, matching core, which commits its own wasm to
+# python/yamc/_wasm rather than building it in CI. vendor/CORE_COMMIT records
+# which core commit produced it, so a stale copy is visible rather than
+# indistinguishable from a fresh one.
+
+node_modules/
+
+# Screenshots from the verification pass.
+*.png

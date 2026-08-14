@@ -156,7 +156,7 @@
 
 <header>
   <h1>YANI online</h1>
-  <p>Nuclide inventory, activity, decay heat and decay photon lines &mdash; solved in
+  <p>Nuclide inventory, activity, decay heat and decay photon lines, solved in
      your browser, on continuous-energy data.</p>
 </header>
 
@@ -185,7 +185,7 @@
       <div data-panel="custom" hidden>
         <p class="note" style="margin-top:0">
           Element symbols expand over natural abundance, nuclide names are taken
-          literally, and chemical formulas are parsed &mdash; the same rules the
+          literally, and chemical formulas are parsed, using the same rules the
           Python API uses.
         </p>
         <table>
@@ -219,7 +219,7 @@
       </div>
 
       <label style="margin-top:.5rem">
-        <span>Volume (cm&sup3;) &mdash; required for activity and decay heat</span>
+        <span>Volume (cm&sup3;), required for activity and decay heat</span>
         <input id="volume" type="number" value="1000" step="any" min="0">
       </label>
     </section>
@@ -277,13 +277,13 @@
         <label>
           <span>Boundaries</span>
           <select id="group-structure">
-            <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV &ndash; 1 GeV)</option>
+            <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV to 1 GeV)</option>
             <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups)</option>
             <option value="VITAMIN-J-42">VITAMIN-J-42 (42 groups)</option>
           </select>
         </label>
         <label>
-          <span>Per-group flux &mdash; one value per group, whitespace or comma separated</span>
+          <span>Per-group flux: one value per group, whitespace or comma separated</span>
           <textarea id="group-flux" spellcheck="false"
                     placeholder="1.2e10 3.4e11 &hellip;"></textarea>
         </label>
@@ -329,8 +329,7 @@
       <div id="budget" class="status">Choose a material to see what needs downloading.</div>
       <progress id="progress" value="0" max="1" hidden></progress>
       <div class="inline" style="margin-top:.75rem">
-        <button id="load-data">Download nuclear data</button>
-        <button id="run" class="secondary" disabled>Run</button>
+        <button id="run">Run</button>
       </div>
       <div class="status" id="status" style="margin-top:.5rem"></div>
       <div class="warn" id="warning" hidden></div>
