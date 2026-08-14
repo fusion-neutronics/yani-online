@@ -28,10 +28,11 @@ const b64 = (buf) => buf.toString("base64");
 const mb = (n) => `${(n / 1048576).toFixed(2)} MB`;
 
 async function main() {
-  const [html, appJs, plotsJs, wasm, glue, plotly] = await Promise.all([
+  const [html, appJs, plotsJs, workerJs, wasm, glue, plotly] = await Promise.all([
     read(SRC, "index.html").then(String),
     read(SRC, "app.js").then(String),
     read(SRC, "plots.js").then(String),
+    read(SRC, "worker.js").then(String),
     read(VENDOR, "yani_wasm_bg.wasm"),
     read(VENDOR, "yani_wasm.js").then(String),
     read(VENDOR, "plotly-basic.min.js"),
@@ -46,9 +47,12 @@ async function main() {
 
   const plotlyGz = gzipSync(plotly, { level: 9 });
 
+  // worker.js is inlined as a string rather than concatenated: it is the
+  // source the page hands to `new Worker`, so it has to survive as text.
   const out = html
     .replace('"__WASM_B64__"', JSON.stringify(b64(wasm)))
     .replace('"__WASM_JS__"', JSON.stringify(glue))
+    .replace('"__WORKER_JS__"', JSON.stringify(workerJs))
     .replace('"__PLOTLY_GZ_B64__"', JSON.stringify(b64(plotlyGz)))
     .replace("__APP_JS__", () => `${plots}\n${app}`);
 
@@ -66,7 +70,7 @@ async function main() {
     `  wasm          ${mb(wasm.length)} raw -> ${mb(b64(wasm).length)} base64\n` +
     `  plotly-basic  ${mb(plotly.length)} raw -> ${mb(plotlyGz.length)} gzip ` +
     `-> ${mb(b64(plotlyGz).length)} base64\n` +
-    `  page + code   ${mb(html.length + app.length + plots.length + glue.length)}`,
+    `  page + code   ${mb(html.length + app.length + plots.length + workerJs.length + glue.length)}`,
   );
 }
 

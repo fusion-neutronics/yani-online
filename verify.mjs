@@ -87,7 +87,10 @@ async function main() {
   const foreign = [];
   page.on("request", (r) => {
     const url = r.url();
-    if (url.startsWith("file://") || url.startsWith(ORIGIN)) return;
+    // blob: is the page reading its own bytes back -- the worker source and the
+    // wasm glue are handed to the browser as blobs because a Worker takes a URL
+    // and a one-file page has no file to give it. Nothing leaves the machine.
+    if (url.startsWith("file://") || url.startsWith("blob:") || url.startsWith(ORIGIN)) return;
     foreign.push(url);
   });
   await page.route(`${ORIGIN}/**`, async (route) => {
@@ -107,6 +110,13 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
   ok("page boots and the solver starts");
 
+  // Where the solver started, which is the whole point of the worker: a page
+  // that boots and answers is not evidence of anything if it is answering from
+  // the thread that paints.
+  const workers = page.workers();
+  if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
+  else fail("no Worker was created -- the solve would block the UI");
+
   if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though
   // it cannot cover the whole closure.
@@ -115,13 +125,50 @@ async function main() {
   await page.fill("#density", "7.874");
   await page.fill("#volume", "1000");
 
-  // One button: Run fetches whatever is missing, then solves.
+  // Count frames while the run happens, and count separately those painted
+  // while the solve is in flight. A solve on the main thread paints none: the
+  // status says "Solving" and then nothing moves until wasm returns. So the
+  // second number is a direct test of where the solve ran, and unlike a timing
+  // threshold it does not depend on how big the fixture set is.
+  //
+  // Measured inside the page rather than by polling over CDP: the fetch phase
+  // makes over a thousand intercepted requests, and the interception delays
+  // replies on the same channel by seconds, which reads as a freeze that the
+  // page is not having.
+  await page.evaluate(() => {
+    const status = document.getElementById("status");
+    const live = { frames: 0, solving: 0, worstGap: 0, last: performance.now() };
+    window.__liveness = live;
+    const tick = () => {
+      const now = performance.now();
+      live.worstGap = Math.max(live.worstGap, now - live.last);
+      live.last = now;
+      live.frames++;
+      if (status.textContent.startsWith("Solving")) live.solving++;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+
   await page.click("#run");
   await page.waitForFunction(
     () => document.getElementById("status").textContent.startsWith("Done"),
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+
+  const live = await page.evaluate(() => window.__liveness);
+  if (!live.frames) {
+    fail("no frames were painted at all -- liveness could not be measured");
+  } else if (!live.solving) {
+    fail("no frame was painted while the solve was in flight: it ran on the main thread");
+  } else {
+    // The worst gap is reported rather than gated. Plotting four charts is
+    // main-thread work by nature and costs a couple of hundred milliseconds;
+    // the number worth watching is whether it grows, not whether it is zero.
+    ok(`UI stayed live: ${live.solving} frames painted during the solve, ` +
+       `worst gap ${live.worstGap.toFixed(0)} ms`);
+  }
 
   const warning = await page.textContent("#warning");
   if (!/No cross sections published for/.test(warning || "")) {

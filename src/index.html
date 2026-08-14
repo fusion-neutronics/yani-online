@@ -362,11 +362,16 @@
 </main>
 
 <script type="module">
-// The build replaces these with base64 payloads; in the dev tree they are
-// fetched from disk so the page can be served straight from src/ without a
-// build step. Both paths end at the same three byte arrays.
+// The build replaces these with the payloads; in the dev tree they are fetched
+// from disk so the page can be served straight from src/ without a build step.
+// Both paths end at the same bytes.
+//
+// WORKER_JS is source, not a payload: the solver runs in a Worker, a Worker
+// needs a URL, and a one-file page has no second file to point at -- so the
+// page carries the text and makes a blob URL of it at boot.
 const WASM_B64 = "__WASM_B64__";
 const WASM_JS = "__WASM_JS__";
+const WORKER_JS = "__WORKER_JS__";
 const PLOTLY_GZ_B64 = "__PLOTLY_GZ_B64__";
 
 __APP_JS__
