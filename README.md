@@ -31,14 +31,14 @@ node build.mjs
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.94 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 3.90 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 3.41 MB |
+| wasm (base64) | 3.37 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
 | page and application code | 0.08 MB |
 
@@ -48,7 +48,10 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 1.87 MB for full Plotly inlined raw.
 
 The wasm is not run through `wasm-opt` in this environment (binaryen cannot be
-downloaded through the proxy), so 2.56 MB is an upper bound.
+downloaded through the proxy), so 2.52 MB is an upper bound. Core's CI does run
+it -- fusion-neutronics/core#467 publishes the optimised `pkg/` as a build
+artifact and a release asset, which is what this repository should vendor from
+once a release carries one.
 
 ## Where the solve runs
 
@@ -84,9 +87,8 @@ they were. The bytes are *transferred* into the worker rather than copied, so a
 few hundred MB of cross sections cross for free.
 
 There is no main-thread fallback. It was written and then removed once all three
-engines were measured rather than guessed at: the failure it was meant to catch
-does not happen, and the one failure that does happen (below) is not one a
-fallback rescues.
+engines were measured rather than guessed at: every one of them starts the
+worker, so the failure it was meant to catch does not happen.
 
 ### What the engines actually do, from `file://`
 
@@ -94,16 +96,18 @@ fallback rescues.
 | --- | --- | --- | --- |
 | Chromium 141 | yes | yes | runs |
 | Firefox 153 | yes | yes | runs |
-| WebKit 26.5 | yes | **no** | **rejected** |
+| WebKit 26.5 | yes | **no** | runs |
 
-Chromium and Firefox both run the page end to end, and agree on the answer to
-the last digit. WebKit starts the worker and loads the glue, then refuses the
-solver itself: *"WebAssembly.Module doesn't parse … relaxed simd instructions
-not supported"*. That is core's wasm build flags, not this page -- the build
-from before the worker existed fails on the same instruction, on the main
-thread, and would need core to stop emitting relaxed SIMD. Safari on macOS has
-not been tested; the WebKit here is the Linux build of the same engine, so it is
-indicative rather than conclusive.
+All three run the page end to end and agree on the answer to the last digit
+(4.0786e14 Bq peak activity for the Fe56 check).
+
+WebKit only started running it recently. It used to reject the solver outright
+-- *"WebAssembly.Module doesn't parse … relaxed simd instructions not
+supported"* -- which was core's dependency rather than this page: `pulp` emitted
+relaxed SIMD for wasm32 whether or not anything called it, and validation is
+module-wide. Fixed in core by fusion-neutronics/core#464 and picked up here by
+re-vendoring. Safari on macOS is still untested; the WebKit here is the Linux
+build of the same engine, so it is indicative rather than conclusive.
 
 ## Development
 
@@ -126,21 +130,20 @@ to it would silently require a second library.
 
 ## Status
 
-Working: the page builds, boots in Chromium from `file://` with no console
-errors, and the PNNL compendium (410 materials) is available before a byte is
-fetched. The solve runs in a Worker and the page keeps painting while it does.
+Working: the page builds, boots from `file://` with no console errors, and the
+PNNL compendium (410 materials) is available before a byte is fetched. The solve
+runs in a Worker and the page keeps painting while it does. The neutron spectrum
+is plotted from the moment the page loads -- it is an input, and the only one
+whose consequences cannot be read off the form.
 
-A full run has been verified in Chromium and in Firefox from `file://` against
-real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and all four
-plots, with a Fe56 material and the 1383 unpublished nuclides of its closure
-answered as 404s. Both give 4.0786e14 Bq peak activity, identical to the last
-digit. `node verify.mjs` is that check; it needs a local copy of the data
+A full run has been verified in Chromium, Firefox and WebKit from `file://`
+against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and
+all four result plots, with a Fe56 material and the 1383 unpublished nuclides of its closure
+answered as 404s. All three give 4.0786e14 Bq peak activity, identical to the
+last digit. `node verify.mjs` is that check; it needs a local copy of the data
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
 one, so CI currently gates on everything up to the first solve.
 
 Not yet done:
 
-- WebKit cannot load the solver: core emits relaxed SIMD, which it does not
-  implement. Nothing in this repository can fix that
 - the single-file session export is not implemented
-- no GitHub Pages workflow
