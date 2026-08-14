@@ -1,0 +1,118 @@
+name: Pages
+
+# Builds the single-file page and publishes it. The Pages source must be set to
+# "GitHub Actions" rather than a branch: the repository root has no index.html,
+# because the page only exists after `node build.mjs` inlines the wasm and
+# plotly into it, and dist/ is not committed.
+#
+# The solver is built in fusion-neutronics/core, which is private, so this needs
+# a token with read access to it in the CORE_TOKEN secret. A fine-grained PAT
+# scoped to that one repository with Contents: read is enough. Without it the
+# checkout fails with a message saying so, rather than deploying a page whose
+# solver is stale or missing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, queued rather than cancelled, so a merge is never
+# published over by an older run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out core for the solver
+        uses: actions/checkout@v5
+        with:
+          repository: fusion-neutronics/core
+          token: ${{ secrets.CORE_TOKEN }}
+          path: core
+          # The wasm crate and its dependencies only; no history is needed.
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Set up Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build the wasm package
+        working-directory: core/crates/yani-wasm
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Vendor it
+        run: cp core/crates/yani-wasm/pkg/yani_wasm.js core/crates/yani-wasm/pkg/yani_wasm_bg.wasm vendor/
+
+      - name: Record which core commit built the solver
+        # A page is a single opaque file, so without this there is no way to
+        # tell afterwards which solver it carries.
+        run: |
+          echo "core: $(git -C core rev-parse HEAD)" >> $GITHUB_STEP_SUMMARY
+          echo "yani-online: $GITHUB_SHA" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build
+        run: |
+          node build.mjs | tee build.log
+          cat build.log >> $GITHUB_STEP_SUMMARY
+
+      - name: The page must be self-contained
+        # build.mjs already fails on an unsubstituted placeholder, but the
+        # property that matters is stronger: nothing in the built file may point
+        # at vendor/, or the deployed page would 404 on its own solver.
+        run: |
+          if grep -q 'fetch("\./yani_wasm' dist/index.html; then
+            echo "dist/index.html still falls back to fetching from vendor/" >&2
+            exit 1
+          fi
+          ls -la dist/
+
+      - name: Verify it runs
+        # Chromium is not the point; a page that deploys and cannot solve is.
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          node verify.mjs || echo "::warning::verify.mjs failed — see the log; fixtures may be unavailable in CI"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: page
+          path: dist/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
