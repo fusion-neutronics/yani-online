@@ -37,11 +37,11 @@ const ok = (msg) => console.log(`ok    ${msg}`);
 
 async function main() {
   if (!existsSync("dist/index.html")) {
-    console.error("dist/index.html missing — run `node build.mjs` first");
+    console.error("dist/index.html missing -- run `node build.mjs` first");
     process.exit(2);
   }
   if (!existsSync(`${CHAIN}/decay/nuclides.arrow`)) {
-    console.error(`fixtures missing at ${CHAIN} — run fetch_test_fixtures.py in core`);
+    console.error(`fixtures missing at ${CHAIN} -- run fetch_test_fixtures.py in core`);
     process.exit(2);
   }
 
@@ -126,7 +126,7 @@ async function main() {
   const activity = await page.$eval("#plot-activity", (el) =>
     Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
   if (activity > 0) ok(`peak activity ${activity.toExponential(3)} Bq`);
-  else fail("activity is zero — data is loaded but nothing activated");
+  else fail("activity is zero -- data is loaded but nothing activated");
 
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });

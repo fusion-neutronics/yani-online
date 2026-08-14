@@ -5,8 +5,8 @@ material, build an irradiation and cooling schedule, run a real transmutation,
 and read back inventory, activity, decay heat and decay photon lines.
 
 The solver is the same Rust that ships in the `yani` wheel, compiled to
-WebAssembly. Cross sections are continuous-energy — nothing is collapsed to a
-multigroup approximation to make it fit — so a browser run and a `pip install
+WebAssembly. Cross sections are continuous-energy -- nothing is collapsed to a
+multigroup approximation to make it fit -- so a browser run and a `pip install
 yani` run give the same answer.
 
 ## Building
@@ -25,7 +25,7 @@ node build.mjs
 
 `dist/index.html` is the result: **one self-contained file**, currently 3.93 MB,
 with the solver, the plotting library and the page inlined. It opens from
-`file://` with no server and no network — nuclear data is the only thing it
+`file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
@@ -44,7 +44,7 @@ downloaded through the proxy), so 2.56 MB is an upper bound.
 
 ## Development
 
-`src/index.html` is servable as-is — it falls back to fetching the wasm, the
+`src/index.html` is servable as-is -- it falls back to fetching the wasm, the
 glue and Plotly from `vendor/` when the build placeholders are unsubstituted, so
 the page can be iterated on without a build step.
 

@@ -507,7 +507,7 @@ function renderSchedule() {
       `<td class="num">${
         step.kind === "pulse"
           ? `<input type="number" step="any" value="${step.rate}" data-s="${i}" data-k="rate">`
-          : "&mdash;"
+          : "--"
       }</td>` +
       `<td class="num"><div class="inline">` +
       `<input type="number" step="any" value="${step.value}" data-s="${i}" data-k="value">` +

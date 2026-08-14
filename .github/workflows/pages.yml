@@ -91,7 +91,7 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-          node verify.mjs || echo "::warning::verify.mjs failed — see the log; fixtures may be unavailable in CI"
+          node verify.mjs || echo "::warning::verify.mjs failed -- see the log; fixtures may be unavailable in CI"
 
       - uses: actions/upload-artifact@v4
         with:
