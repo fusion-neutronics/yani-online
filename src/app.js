@@ -10,7 +10,7 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawPhotons } from "./plots.js";
+import { drawAll, drawPhotons, drawSpectrum } from "./plots.js";
 
 // --- nuclear data ---------------------------------------------------------
 
@@ -456,6 +456,34 @@ async function currentSchedule(solver) {
 
 // --- run ------------------------------------------------------------------
 
+/// Draw the spectrum the run would use, whatever is currently selected.
+///
+/// Shares `currentSpectrum` with the run rather than reading the form a second
+/// time, so what is plotted is what is solved. A spectrum that does not parse
+/// -- a half-typed group vector, the wrong count for a structure -- says so and
+/// leaves the previous curve up, because clearing the plot on every keystroke
+/// is worse than a plot that lags a stale entry by one edit.
+///
+/// Stale answers are dropped the way the budget's are: `groupStructure` is a
+/// round trip to the worker, and a fast typist can outrun it.
+let spectrumToken = 0;
+
+async function refreshSpectrum() {
+  if (!state.solver) return;
+  const token = ++spectrumToken;
+  try {
+    const { boundaries, values } = await currentSpectrum();
+    if (token !== spectrumToken) return;
+    drawSpectrum(boundaries, values);
+    $("spectrum-status").textContent =
+      `${values.length} groups, ${boundaries[0].toExponential(0)} to ` +
+      `${boundaries[boundaries.length - 1].toExponential(2)} eV`;
+  } catch (e) {
+    if (token !== spectrumToken) return;
+    $("spectrum-status").textContent = String(e.message || e);
+  }
+}
+
 /// Report what the current material would have to download.
 ///
 /// Fired by every keystroke and every dropdown, and each answer now takes a
@@ -586,6 +614,7 @@ function wireTabs() {
         body.hidden = body.dataset.panel !== btn.dataset.tab;
       }
       refreshBudget();
+      refreshSpectrum();
     });
   }
 }
@@ -686,6 +715,13 @@ async function main() {
   $("pnnl-select").addEventListener("change", refreshBudget);
   $("volume").addEventListener("change", refreshBudget);
 
+  // Every control that changes the spectrum redraws it. `input` rather than
+  // `change` on the pasted vector so the plot follows the typing.
+  $("spectrum-preset").addEventListener("change", refreshSpectrum);
+  $("group-structure").addEventListener("change", refreshSpectrum);
+  $("group-flux").addEventListener("input", refreshSpectrum);
+  refreshSpectrum();
+
   $("composition").addEventListener("input", (e) => {
     const { i, k } = e.target.dataset;
     if (i === undefined) return;
@@ -724,6 +760,17 @@ async function main() {
   });
 
   $("run").addEventListener("click", run);
+  // The palettes are separately validated per theme rather than flipped, so a
+  // theme change rebuilds the charts. The spectrum is up before any run, which
+  // is exactly when someone is most likely to switch.
+  window.addEventListener("yani:redraw", () => {
+    refreshSpectrum();
+    if (state.results) {
+      drawAll(state.results);
+      drawPhotons(state.results, Number($("photon-step").value));
+    }
+  });
+
   $("photon-step").addEventListener("input", (e) => {
     const i = Number(e.target.value);
     $("photon-step-label").value = i + 1;

@@ -335,6 +335,19 @@
       <div class="warn" id="warning" hidden></div>
     </section>
 
+    <!-- Before the run, not after it. The spectrum is an input, and the only
+         one whose consequences cannot be read off the form: a preset's name
+         does not say where its flux sits, and a pasted 709-group vector is
+         unreadable as numbers. Drawn on load and on every edit. -->
+    <section class="panel">
+      <!-- "Spectrum", not "Neutron spectrum": the input panel opposite already
+           carries that name, and two panels with one name is a worse label than
+           a short one. -->
+      <h2>Spectrum</h2>
+      <div class="plot-wrap"><div class="plot" id="plot-spectrum"></div></div>
+      <div class="status" id="spectrum-status"></div>
+    </section>
+
     <section class="panel">
       <h2>Results</h2>
       <div id="results-empty" class="note" style="margin-top:0">
