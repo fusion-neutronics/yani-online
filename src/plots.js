@@ -158,7 +158,10 @@ function decaySeriesChart(el, results, key, title, yLabel) {
     const last = s.values.map((v, j) => [v, j]).filter(([v]) => v > floor).pop();
     if (!last) return null;
     return {
-      x: x[last[1]],
+      // Both coordinates are log10 here, not just y. Annotations on a log axis
+      // are positioned in log space, so a linear x puts the label thousands of
+      // decades off-plot -- invisible, and silently so.
+      x: Math.log10(x[last[1]]),
       y: Math.log10(last[0]),
       text: s.name,
       showarrow: false,

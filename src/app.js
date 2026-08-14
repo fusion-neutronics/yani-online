@@ -40,7 +40,12 @@ const CHAIN_SECTIONS = {
   decay: [["nuclides.arrow", true], ["decay_modes.arrow", false], ["sources.arrow", false]],
   reactions: [["reactions.arrow", true]],
   fission_yields: [["fission_yields.arrow", true], ["aliases.arrow", false]],
-  branching: [["branching.arrow", true]],
+  // Optional as a whole, not just per-file. The isomeric-branching overlay is
+  // an overlay: `parse_chain_parts` takes it as an Option, and core's config
+  // defaults `transmutation_branch_ratios` to None. Marking its file required
+  // makes a library that does not publish one fail the entire chain load,
+  // which is what it did.
+  branching: [["branching.arrow", false]],
 };
 
 // What an activation run reads from a nuclide: the union energy grid and the
@@ -57,7 +62,8 @@ const PRESETS = {
   "fusion-fw": {
     label: "Fusion first wall",
     boundaries: [1e-5, 1e2, 1e4, 1e5, 1e6, 5e6, 1.2e7, 1.5e7],
-    values: [0.06, 0.05, 0.06, 0.10, 0.18, 0.15, 0.35, 0.05],
+    // Seven groups for eight boundaries, the last carrying the 14 MeV peak.
+    values: [0.06, 0.05, 0.06, 0.10, 0.18, 0.15, 0.40],
   },
   "dt-point": {
     label: "D-T point source",
@@ -76,6 +82,18 @@ const PRESETS = {
   },
 };
 
+// A preset with the wrong number of values is only caught by the solver, deep
+// in a run, as "boundaries (8) must be one longer than masses (8)" -- after the
+// user has waited through a data download. Checked at load instead, so a typo
+// here fails immediately and visibly rather than at the worst moment.
+for (const [name, preset] of Object.entries(PRESETS)) {
+  if (preset.boundaries.length !== preset.values.length + 1) {
+    throw new Error(
+      `spectrum preset '${name}': ${preset.boundaries.length} boundaries needs ` +
+      `${preset.boundaries.length - 1} values, has ${preset.values.length}`);
+  }
+}
+
 // --- state ----------------------------------------------------------------
 
 const state = {
@@ -83,9 +101,23 @@ const state = {
   required: [],       // nuclides needing cross sections
   loadedData: false,
   results: null,
+  // A year of irradiation, then cooling sampled log-spaced from an hour to ten
+  // years. A single cooldown step is a defensible default and a useless plot:
+  // two points a day apart on a log axis show nothing, and the whole shape of
+  // an activation problem is which nuclide dominates at which decade. Each
+  // cooldown's duration is the length of *that step*, so these are the gaps
+  // between the cumulative times, not the times themselves.
   schedule: [
     { kind: "pulse", rate: 1e14, value: 1, unit: "a" },
-    { kind: "cooldown", value: 1, unit: "d" },
+    { kind: "cooldown", value: 1, unit: "h" },
+    { kind: "cooldown", value: 5, unit: "h" },
+    { kind: "cooldown", value: 18, unit: "h" },
+    { kind: "cooldown", value: 3, unit: "d" },
+    { kind: "cooldown", value: 10, unit: "d" },
+    { kind: "cooldown", value: 46, unit: "d" },
+    { kind: "cooldown", value: 305, unit: "d" },
+    { kind: "cooldown", value: 3, unit: "a" },
+    { kind: "cooldown", value: 6, unit: "a" },
   ],
   composition: [{ name: "Fe", fraction: 1.0 }],
 };
@@ -205,10 +237,17 @@ async function loadCrossSections(session, nuclides) {
   const library = $("data-xs").value;
   const jobs = [];
   for (const nuclide of nuclides) {
-    for (const [file, required] of NUCLIDE_SECTIONS) {
+    for (const [file] of NUCLIDE_SECTIONS) {
       jobs.push({
+        // Every one of these is optional at the fetch layer, which is a
+        // deliberate difference from the wheel. The chain names more nuclides
+        // than any single library evaluates, so a handful of 404s is normal
+        // rather than exceptional, and failing the run over one would make the
+        // app unusable on a library with a gap. What is NOT acceptable is
+        // swallowing them: a nuclide with no cross sections reacts at zero, so
+        // the count is surfaced rather than logged.
         url: `${ORIGIN}/${library}/neutron/${nuclide}.arrow/${file}`,
-        optional: !required,
+        optional: true,
         nuclide,
         file,
       });
@@ -217,13 +256,16 @@ async function loadCrossSections(session, nuclides) {
   setStatus(`Fetching cross sections for ${nuclides.length} nuclides…`);
   const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
   let held = 0;
+  const missing = new Set();
   jobs.forEach((job, i) => {
     if (bytes[i]) {
       session.addNuclideData(job.nuclide, job.file, bytes[i]);
       held += bytes[i].length;
+    } else {
+      missing.add(job.nuclide);
     }
   });
-  return held;
+  return { held, missing: [...missing] };
 }
 
 // --- building the calculation --------------------------------------------
@@ -507,10 +549,23 @@ async function main() {
       state.chainLoaded = true;
       state.required = JSON.parse(state.session.requiredNuclides());
       $("budget").textContent = `${state.required.length} nuclides need cross sections.`;
-      const held = await loadCrossSections(state.session, state.required);
+      const { held, missing } = await loadCrossSections(state.session, state.required);
       state.loadedData = true;
       setStatus(`Loaded ${(held / 1048576).toFixed(0)} MB across ` +
                 `${state.session.fileCount()} files.`);
+      if (missing.length) {
+        // Named, not just counted: which nuclides are missing decides whether
+        // the answer is usable. A gap in a trace activation product is noise;
+        // a gap in something the material is made of is not.
+        const shown = missing.slice(0, 12).join(", ");
+        warn(
+          `No cross sections published for ${missing.length} of ` +
+          `${state.required.length} nuclides: ${shown}` +
+          `${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
+          `They react at zero, so anything downstream of them is missing from ` +
+          `the result rather than wrong.`,
+        );
+      }
       $("run").disabled = false;
     } catch (e) {
       warn(String(e.message || e));
