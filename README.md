@@ -58,34 +58,52 @@ its whole duration -- no scrolling, no repaint, no way to tell a long solve from
 a hung one. `src/worker.js` owns the wasm session now; the page talks to it over
 a small `{ id, method, args }` protocol and awaits the answers.
 
-Three details are forced by the page being one file opened from `file://`:
+The worker is **one blob holding one classic script**: the wasm-bindgen glue,
+converted from a module at boot, with `worker.js` appended. Both halves of that
+are forced, and by different browsers:
 
-- **The worker source is carried as text** and turned into a blob URL at boot,
-  because `new Worker` takes a URL and there is no second file to point it at.
-- **It is a classic script, not a module.** On a `file://` origin a blob URL is
-  opaque, and a module Worker refuses to load one -- *"Script at 'blob:null/…'
-  cannot be accessed from origin 'null'"*. A classic Worker from the same blob
-  starts.
-- **The wasm-bindgen glue stays an ES module** (`wasm-pack build --target web`,
-  as before). A classic worker reaches it through dynamic `import()` of a
-  second blob URL, so no second build target is needed here.
+- **Classic, not a module**, because Chromium refuses to make a module Worker
+  out of a blob URL on an opaque origin -- *"Script at 'blob:null/…' cannot be
+  accessed from origin 'null'"*. A classic Worker from the same blob starts.
+  (Firefox and WebKit will load either.)
+- **One script, not two**, because WebKit refuses to load any second script
+  into a worker from a blob -- *"Cross-origin script load denied by Cross-Origin
+  Resource Sharing policy"* -- for `importScripts` and dynamic `import()`
+  alike. So the glue cannot be fetched by the worker; it has to arrive with it.
+
+That is the same shape `wasm-pack build --target no-modules` produces.
+`glueToClassic` in app.js does it at boot instead -- four substitutions on the
+generated file, validated to have consumed every `export` -- so this repository
+keeps vendoring a single `--target web` package. `import.meta.url` is rewritten
+even though the branch using it never runs: it is a syntax error in a classic
+script, so a parse would fail before anything executed.
 
 Fetching stays on the main thread: it is waiting, not work, and keeping it there
 leaves the fetch loop, the progress bar and the missing-nuclide reporting where
 they were. The bytes are *transferred* into the worker rather than copied, so a
 few hundred MB of cross sections cross for free.
 
-If a browser refuses to make a Worker at all, the same worker source is
-evaluated on the main thread behind a shim that presents the same message
-interface. The solve blocks the page exactly as it did before, which is worse
-than a worker and much better than a page that does not run. Two cases are
-worth expecting: a browser stricter than Chromium about what a `file://`
-document may do, and a Content-Security-Policy without `worker-src blob:` where
-the file is served rather than opened. `verify.mjs` exercises both paths, and
-fails if the normal one silently becomes the fallback.
+There is no main-thread fallback. It was written and then removed once all three
+engines were measured rather than guessed at: the failure it was meant to catch
+does not happen, and the one failure that does happen (below) is not one a
+fallback rescues.
 
-Only Chromium has been tested. The worker path is verified there; the fallback
-is a hedge against the browsers that have not been.
+### What the engines actually do, from `file://`
+
+| | classic blob worker | second script inside it | this wasm |
+| --- | --- | --- | --- |
+| Chromium 141 | yes | yes | runs |
+| Firefox 153 | yes | yes | runs |
+| WebKit 26.5 | yes | **no** | **rejected** |
+
+Chromium and Firefox both run the page end to end, and agree on the answer to
+the last digit. WebKit starts the worker and loads the glue, then refuses the
+solver itself: *"WebAssembly.Module doesn't parse … relaxed simd instructions
+not supported"*. That is core's wasm build flags, not this page -- the build
+from before the worker existed fails on the same instruction, on the main
+thread, and would need core to stop emitting relaxed SIMD. Safari on macOS has
+not been tested; the WebKit here is the Linux build of the same engine, so it is
+indicative rather than conclusive.
 
 ## Development
 
@@ -112,14 +130,17 @@ Working: the page builds, boots in Chromium from `file://` with no console
 errors, and the PNNL compendium (410 materials) is available before a byte is
 fetched. The solve runs in a Worker and the page keeps painting while it does.
 
-A full run has been verified in Chromium from `file://` against real
-ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and all four plots,
-with a Fe56 material and the 1383 unpublished nuclides of its closure answered
-as 404s. `node verify.mjs` is that check; it needs a local copy of the data
+A full run has been verified in Chromium and in Firefox from `file://` against
+real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and all four
+plots, with a Fe56 material and the 1383 unpublished nuclides of its closure
+answered as 404s. Both give 4.0786e14 Bq peak activity, identical to the last
+digit. `node verify.mjs` is that check; it needs a local copy of the data
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
 one, so CI currently gates on everything up to the first solve.
 
 Not yet done:
 
+- WebKit cannot load the solver: core emits relaxed SIMD, which it does not
+  implement. Nothing in this repository can fix that
 - the single-file session export is not implemented
 - no GitHub Pages workflow

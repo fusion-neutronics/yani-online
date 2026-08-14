@@ -68,14 +68,6 @@ async function main() {
 
   const errors = [];
   page.on("pageerror", (e) => errors.push(`PAGEERROR ${e.message}`));
-  // The page falls back to solving on the main thread when a Worker cannot be
-  // made, and says so. That fallback is there for browsers that refuse blob
-  // workers on file://, not for this one: taking it here is the regression the
-  // worker exists to prevent, and it is invisible in the result otherwise.
-  const fellBack = [];
-  page.on("console", (m) => {
-    if (/falling back to this thread|no Worker available/.test(m.text())) fellBack.push(m.text());
-  });
   // The 404s are deliberate -- this fixture set covers a handful of nuclides
   // and the chain names hundreds -- so the browser logs one per miss. Filtering
   // them keeps the check meaningful; anything else is a real error.
@@ -122,8 +114,7 @@ async function main() {
   // that boots and answers is not evidence of anything if it is answering from
   // the thread that paints.
   const workers = page.workers();
-  if (fellBack.length) fail(`fell back to the main thread: ${fellBack[0]}`);
-  else if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
+  if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
   else fail("no Worker was created -- the solve would block the UI");
 
   if (haveFixtures) {
@@ -218,36 +209,6 @@ async function main() {
   await page.screenshot({ path: "verify-dark.png", fullPage: true });
   ok("screenshots written: verify-light.png, verify-dark.png");
   }  // haveFixtures
-
-  // The fallback, which nothing else exercises: a browser that refuses to make
-  // a Worker out of a blob URL on a file:// origin gets the same solver run on
-  // the main thread, and a page that boots is the difference between slow and
-  // broken. It is only reachable by pretending to be such a browser, so it can
-  // rot silently -- which is exactly why it is checked.
-  const noWorkers = await browser.newPage();
-  const fallbackErrors = [];
-  noWorkers.on("pageerror", (e) => fallbackErrors.push(e.message));
-  await noWorkers.addInitScript(() => {
-    window.Worker = function () {
-      throw new DOMException("Script cannot be accessed from origin 'null'", "SecurityError");
-    };
-  });
-  await noWorkers.goto(`file://${process.cwd()}/dist/index.html`);
-  try {
-    await noWorkers.waitForFunction(
-      () => document.getElementById("status").textContent.startsWith("Ready"),
-      null, { timeout: 60000 },
-    );
-    const materials = await noWorkers.$$eval("#pnnl-select option", (o) => o.length);
-    if (materials > 0 && !fallbackErrors.length) {
-      ok(`without Workers the page still starts (${materials} materials listed)`);
-    } else {
-      fail(`the no-Worker fallback started badly: ${fallbackErrors[0] || "no materials listed"}`);
-    }
-  } catch {
-    fail("the page does not start when Workers are unavailable");
-  }
-  await noWorkers.close();
 
   // The single-file property, checked by behaviour rather than by text.
   if (foreign.length === 0) {
