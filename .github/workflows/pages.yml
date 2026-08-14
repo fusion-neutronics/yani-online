@@ -31,6 +31,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: CORE_TOKEN must be set
+        # Without this the run fails four steps later inside actions/checkout
+        # with "Input required and not supplied: token", which names neither the
+        # secret nor the reason. An empty token is a setup problem with one
+        # answer, so say what it is.
+        env:
+          CORE_TOKEN: ${{ secrets.CORE_TOKEN }}
+        run: |
+          if [ -z "$CORE_TOKEN" ]; then
+            echo "::error::CORE_TOKEN is not set. The solver is built in" \
+                 "fusion-neutronics/core, which is private, so this workflow needs a" \
+                 "fine-grained PAT scoped to that repository with Contents: read," \
+                 "stored as the CORE_TOKEN secret on this repository."
+            exit 1
+          fi
+
       - name: Check out core for the solver
         uses: actions/checkout@v5
         with:
