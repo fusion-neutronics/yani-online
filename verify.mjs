@@ -55,8 +55,13 @@ async function main() {
     console.log("note  set YANI_FIXTURES, or run fetch_test_fixtures.py in core");
   }
 
+  // Only pin the binary when this environment ships one at a fixed path. On a
+  // runner, `playwright install` puts it under ~/.cache/ms-playwright and
+  // Playwright finds it itself; pointing at a path that does not exist there
+  // fails the launch outright.
+  const pinned = "/opt/pw-browsers/chromium";
   const browser = await chromium.launch({
-    executablePath: "/opt/pw-browsers/chromium",
+    ...(existsSync(pinned) ? { executablePath: pinned } : {}),
     headless: !process.argv.includes("--headed"),
   });
   const page = await browser.newPage({ viewport: { width: 1400, height: 1600 } });
