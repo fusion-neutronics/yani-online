@@ -15,7 +15,10 @@ import { chromium } from "playwright";
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
-const FIXTURES = "/workspace/core/crates/yamc/tests";
+// Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
+// a sibling checkout, which is where they land after
+// `python3 scripts/fetch_test_fixtures.py` in core.
+const FIXTURES = process.env.YANI_FIXTURES || "../core/crates/yamc/tests";
 const CHAIN = `${FIXTURES}/transmutation-endf-b8.1-sfr.arrow`;
 const ORIGIN = "https://yamc-data.xsplot.com";
 
@@ -40,9 +43,16 @@ async function main() {
     console.error("dist/index.html missing -- run `node build.mjs` first");
     process.exit(2);
   }
-  if (!existsSync(`${CHAIN}/decay/nuclides.arrow`)) {
-    console.error(`fixtures missing at ${CHAIN} -- run fetch_test_fixtures.py in core`);
-    process.exit(2);
+  // A transmutation needs core's nuclear-data fixtures, which are gigabytes and
+  // are not present in CI. Everything before the first run does not: whether the
+  // page boots, whether the solver starts, and whether it fetches anything it
+  // should have carried are all answerable without a single nuclide. So the run
+  // is skipped rather than the check failed, and the parts that still mean
+  // something still run.
+  const haveFixtures = existsSync(`${CHAIN}/decay/nuclides.arrow`);
+  if (!haveFixtures) {
+    console.log(`note  no fixtures at ${CHAIN}: skipping the transmutation`);
+    console.log("note  set YANI_FIXTURES, or run fetch_test_fixtures.py in core");
   }
 
   const browser = await chromium.launch({
@@ -92,6 +102,7 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
   ok("page boots and the solver starts");
 
+  if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though
   // it cannot cover the whole closure.
   await page.click('[data-tab="custom"]');
@@ -145,6 +156,7 @@ async function main() {
   await page.waitForTimeout(2000);
   await page.screenshot({ path: "verify-dark.png", fullPage: true });
   ok("screenshots written: verify-light.png, verify-dark.png");
+  }  // haveFixtures
 
   // The single-file property, checked by behaviour rather than by text.
   if (foreign.length === 0) {
