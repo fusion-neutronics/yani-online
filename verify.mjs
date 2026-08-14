@@ -64,6 +64,17 @@ async function main() {
 
   let served = 0;
   let missed = 0;
+  // Anything the page asks for that is not nuclear data. The built file is
+  // supposed to carry the solver and the plotting library inside it, and the
+  // only way to know it does is to watch what it actually requests: the dev
+  // fallback that fetches them from vendor/ is still present in the bundle as
+  // dead code, so its absence cannot be grepped for.
+  const foreign = [];
+  page.on("request", (r) => {
+    const url = r.url();
+    if (url.startsWith("file://") || url.startsWith(ORIGIN)) return;
+    foreign.push(url);
+  });
   await page.route(`${ORIGIN}/**`, async (route) => {
     const path = fixturePath(route.request().url());
     if (path && existsSync(path)) {
@@ -134,6 +145,13 @@ async function main() {
   await page.waitForTimeout(2000);
   await page.screenshot({ path: "verify-dark.png", fullPage: true });
   ok("screenshots written: verify-light.png, verify-dark.png");
+
+  // The single-file property, checked by behaviour rather than by text.
+  if (foreign.length === 0) {
+    ok("self-contained: nothing fetched except nuclear data");
+  } else {
+    fail(`page fetched ${foreign.length} foreign resources: ${foreign.slice(0, 5).join(", ")}`);
+  }
 
   if (errors.length) fail(`console errors: ${errors.slice(0, 5).join(" | ")}`);
   else ok("no console errors");

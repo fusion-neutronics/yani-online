@@ -44,20 +44,16 @@ jobs:
             echo "solver built from core $(cat vendor/CORE_COMMIT)"
           } >> $GITHUB_STEP_SUMMARY
 
-      - name: The page must be self-contained
-        # build.mjs already fails on an unsubstituted placeholder, but the
-        # property that matters is stronger: nothing in the built file may point
-        # at vendor/, or the deployed page would 404 on its own solver.
-        run: |
-          if grep -q 'fetch("\./yani_wasm' dist/index.html; then
-            echo "::error::dist/index.html still falls back to fetching from vendor/"
-            exit 1
-          fi
-          ls -la dist/
-
-      - name: Verify it runs
+      - name: Verify it runs and is self-contained
         # Chromium is not the point; a page that deploys and cannot solve is.
+        #
+        # This also carries the self-contained check. Grepping the bundle for a
+        # vendor/ fetch does not work: the dev fallback is a runtime branch that
+        # never fires once the placeholders are substituted, but its text is
+        # still inlined, so the grep always matches. verify.mjs watches what the
+        # page actually requests instead.
         run: |
+          ls -la dist/
           npm ci
           npx playwright install --with-deps chromium
           node verify.mjs
