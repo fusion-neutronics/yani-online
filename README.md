@@ -11,8 +11,11 @@ yani` run give the same answer.
 
 ## Building
 
-The wasm package is built in [core](https://github.com/fusion-neutronics/core)
-and copied here, so that repository is the source of truth for the solver:
+The solver is committed under `vendor/`, matching core, which commits its own
+wasm to `python/yamc/_wasm` rather than building it in CI. So a build here needs
+nothing but Node, and the Pages workflow needs no secrets.
+
+Refreshing it after a change to core:
 
 ```bash
 # in core
@@ -20,8 +23,13 @@ cd crates/yani-wasm && wasm-pack build --target web --out-dir pkg
 
 # here
 cp ../core/crates/yani-wasm/pkg/yani_wasm{.js,_bg.wasm} vendor/
+git -C ../core rev-parse HEAD > vendor/CORE_COMMIT
 node build.mjs
 ```
+
+`vendor/CORE_COMMIT` records which core commit produced the solver. The page is
+one opaque file, so without it there is no way to tell afterwards which solver a
+given build carries, and a stale copy would look no different from a fresh one.
 
 `dist/index.html` is the result: **one self-contained file**, currently 3.93 MB,
 with the solver, the plotting library and the page inlined. It opens from

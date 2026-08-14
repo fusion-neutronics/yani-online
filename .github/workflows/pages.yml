@@ -5,11 +5,11 @@ name: Pages
 # because the page only exists after `node build.mjs` inlines the wasm and
 # plotly into it, and dist/ is not committed.
 #
-# The solver is built in fusion-neutronics/core, which is private, so this needs
-# a token with read access to it in the CORE_TOKEN secret. A fine-grained PAT
-# scoped to that one repository with Contents: read is enough. Without it the
-# checkout fails with a message saying so, rather than deploying a page whose
-# solver is stale or missing.
+# No secrets. The solver is committed under vendor/, matching core, which
+# commits its own wasm to python/yamc/_wasm rather than building it in CI, so
+# this workflow needs nothing beyond the default GITHUB_TOKEN. Refreshing the
+# solver is `wasm-pack build` in core and a copy into vendor/, recorded in
+# vendor/CORE_COMMIT -- see the README.
 
 on:
   push:
@@ -31,65 +31,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: CORE_TOKEN must be set
-        # Without this the run fails four steps later inside actions/checkout
-        # with "Input required and not supplied: token", which names neither the
-        # secret nor the reason. An empty token is a setup problem with one
-        # answer, so say what it is.
-        env:
-          CORE_TOKEN: ${{ secrets.CORE_TOKEN }}
-        run: |
-          if [ -z "$CORE_TOKEN" ]; then
-            echo "::error::CORE_TOKEN is not set. The solver is built in" \
-                 "fusion-neutronics/core, which is private, so this workflow needs a" \
-                 "fine-grained PAT scoped to that repository with Contents: read," \
-                 "stored as the CORE_TOKEN secret on this repository."
-            exit 1
-          fi
-
-      - name: Check out core for the solver
-        uses: actions/checkout@v5
-        with:
-          repository: fusion-neutronics/core
-          token: ${{ secrets.CORE_TOKEN }}
-          path: core
-          # The wasm crate and its dependencies only; no history is needed.
-          fetch-depth: 1
-
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
 
-      - name: Set up Rust
-        run: |
-          rustup update stable && rustup default stable
-          rustup target add wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: core
-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Build the wasm package
-        working-directory: core/crates/yani-wasm
-        run: wasm-pack build --target web --out-dir pkg
-
-      - name: Vendor it
-        run: cp core/crates/yani-wasm/pkg/yani_wasm.js core/crates/yani-wasm/pkg/yani_wasm_bg.wasm vendor/
-
-      - name: Record which core commit built the solver
-        # A page is a single opaque file, so without this there is no way to
-        # tell afterwards which solver it carries.
-        run: |
-          echo "core: $(git -C core rev-parse HEAD)" >> $GITHUB_STEP_SUMMARY
-          echo "yani-online: $GITHUB_SHA" >> $GITHUB_STEP_SUMMARY
-
       - name: Build
         run: |
           node build.mjs | tee build.log
-          cat build.log >> $GITHUB_STEP_SUMMARY
+          {
+            cat build.log
+            echo
+            echo "solver built from core $(cat vendor/CORE_COMMIT)"
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: The page must be self-contained
         # build.mjs already fails on an unsubstituted placeholder, but the
@@ -97,7 +50,7 @@ jobs:
         # at vendor/, or the deployed page would 404 on its own solver.
         run: |
           if grep -q 'fetch("\./yani_wasm' dist/index.html; then
-            echo "dist/index.html still falls back to fetching from vendor/" >&2
+            echo "::error::dist/index.html still falls back to fetching from vendor/"
             exit 1
           fi
           ls -la dist/
@@ -107,12 +60,15 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-          node verify.mjs || echo "::warning::verify.mjs failed -- see the log; fixtures may be unavailable in CI"
+          node verify.mjs
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: page
-          path: dist/index.html
+          path: |
+            dist/index.html
+            verify-*.png
 
       - uses: actions/upload-pages-artifact@v3
         with:

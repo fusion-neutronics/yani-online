@@ -1,12 +1,10 @@
 # Build output. `node build.mjs` regenerates it from src/ and vendor/.
 dist/
 
-# Built in core by `wasm-pack build --target web` and copied here. Not
-# committed: it is a compiled artifact of another repository at a particular
-# commit, and a stale copy would be indistinguishable from a fresh one.
-vendor/yani_wasm.js
-vendor/yani_wasm_bg.wasm
-vendor/yani_wasm*.d.ts
+# vendor/yani_wasm* IS committed, matching core, which commits its own wasm to
+# python/yamc/_wasm rather than building it in CI. vendor/CORE_COMMIT records
+# which core commit produced it, so a stale copy is visible rather than
+# indistinguishable from a fresh one.
 
 node_modules/
 
