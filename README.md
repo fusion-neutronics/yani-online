@@ -134,7 +134,8 @@ Working: the page builds, boots from `file://` with no console errors, and the
 PNNL compendium (410 materials) is available before a byte is fetched. The solve
 runs in a Worker and the page keeps painting while it does. The neutron spectrum
 is plotted from the moment the page loads -- it is an input, and the only one
-whose consequences cannot be read off the form.
+whose consequences cannot be read off the form. Every chart carries log/linear
+toggles for the axes a scale means something for.
 
 A full run has been verified in Chromium, Firefox and WebKit from `file://`
 against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and

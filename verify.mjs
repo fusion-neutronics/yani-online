@@ -125,6 +125,22 @@ async function main() {
   if (spectrumBefore > 0) ok("the neutron spectrum is plotted before any run");
   else fail("no spectrum drawn before the run");
 
+  // The scale toggles, checked by their effect rather than their presence: a
+  // select that renders and changes nothing is the failure this is for. The
+  // spectrum's is the one that works before a run.
+  const flipped = await page.evaluate(async () => {
+    const select = document.querySelector(".axis-scale select");
+    select.value = "linear";
+    select.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 300));
+    const type = document.getElementById("plot-spectrum").layout.xaxis.type;
+    select.value = "log";
+    select.dispatchEvent(new Event("change"));
+    return type;
+  });
+  if (flipped === "linear") ok("an axis scale toggle changes the axis");
+  else fail(`toggling the spectrum's x scale left it '${flipped}'`);
+
   // And that it follows the form rather than being drawn once. A preset with a
   // different group count is the cheapest thing to check it against.
   await page.selectOption("#spectrum-preset", "thermal");

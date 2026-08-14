@@ -107,6 +107,72 @@ function baseLayout(title, xLabel, yLabel, extra = {}) {
 
 const CONFIG = { displayModeBar: false, responsive: true };
 
+// --- axis scales ----------------------------------------------------------
+
+/// Which axes a scale toggle means anything for, per chart.
+///
+/// The inventory's y is nuclide names, so it gets an x control only: offering
+/// "log" for a categorical axis is a control that does nothing, which is worse
+/// than no control.
+const AXES = {
+  "plot-spectrum": ["x", "y"],
+  "plot-activity": ["x", "y"],
+  "plot-heat": ["x", "y"],
+  "plot-inventory": ["x"],
+  "plot-photons": ["x", "y"],
+};
+
+/// Log everywhere by default, which is what these quantities are read on:
+/// activity over a decade of cooling, a spectrum across ten decades of energy.
+/// The toggle exists because a reader comparing two nearby values, or checking
+/// whether something really is flat, wants linear for that one look.
+const scales = new Map();
+const scaleOf = (id, axis) => scales.get(`${id}.${axis}`) || "log";
+
+/// Plotly positions annotations in the axis's own coordinates, which on a log
+/// axis means log10 of the value. Mixing the two puts a label thousands of
+/// decades off-plot -- invisible, and silently so.
+const at = (type, v) => (type === "log" ? Math.log10(v) : v);
+
+/// The visible range, in the axis's own coordinates. A log axis is floored a
+/// fixed number of decades below the peak; a linear one starts at zero, where
+/// the decades below are a sliver above the axis line and need no floor.
+const span = (type, floor, peak, headroom) =>
+  type === "log" ? [Math.log10(floor), Math.log10(peak * headroom)] : [0, peak * 1.05];
+
+/// Put a scale toggle above each chart and call `onChange(id)` when one moves.
+///
+/// Built here rather than written into index.html because this file already
+/// owns which charts exist and which of their axes the control applies to.
+export function wireAxisScales(onChange) {
+  for (const [id, axes] of Object.entries(AXES)) {
+    const plot = document.getElementById(id);
+    if (!plot) continue;
+    const bar = document.createElement("div");
+    bar.className = "axis-scale";
+    for (const axis of axes) {
+      const label = document.createElement("label");
+      const name = document.createElement("span");
+      name.textContent = axis;
+      const select = document.createElement("select");
+      for (const type of ["log", "linear"]) {
+        const option = document.createElement("option");
+        option.value = option.textContent = type;
+        option.selected = type === scaleOf(id, axis);
+        select.append(option);
+      }
+      select.addEventListener("change", () => {
+        scales.set(`${id}.${axis}`, select.value);
+        onChange(id);
+      });
+      label.append(name, select);
+      bar.append(label);
+    }
+    (plot.closest(".plot-wrap") || plot).before(bar);
+  }
+}
+
+
 /// Split a per-step list of {nuclide: value} into the largest few by peak, with
 /// everything else summed into "Other".
 ///
@@ -138,6 +204,8 @@ const DECADES = 6;
 
 function decaySeriesChart(el, results, key, title, yLabel) {
   const m = mode();
+  const xType = scaleOf(el.id, "x");
+  const yType = scaleOf(el.id, "y");
   const times = results.map((r) => r.time);
   const { scale, label } = timeAxis(times);
   const x = times.map((t) => t * scale);
@@ -153,7 +221,10 @@ function decaySeriesChart(el, results, key, title, yLabel) {
     mode: "lines+markers",
     name: s.name,
     x,
-    y: s.values.map((v) => (v > floor ? v : null)),
+    // The floor is a log-axis concern: it stops decayed-away dust from setting
+    // the scale. On linear the dust sits on the axis line and costs nothing, so
+    // the series is drawn whole rather than cut off.
+    y: s.values.map((v) => (yType === "log" && v <= floor ? null : v)),
     line: { width: 2, color: s.other ? OTHER[m] : SERIES[m][i] },
     marker: { size: 8, color: s.other ? OTHER[m] : SERIES[m][i] },
     connectgaps: false,
@@ -167,11 +238,11 @@ function decaySeriesChart(el, results, key, title, yLabel) {
     const last = s.values.map((v, j) => [v, j]).filter(([v]) => v > floor).pop();
     if (!last) return null;
     return {
-      // Both coordinates are log10 here, not just y. Annotations on a log axis
-      // are positioned in log space, so a linear x puts the label thousands of
-      // decades off-plot -- invisible, and silently so.
-      x: Math.log10(x[last[1]]),
-      y: Math.log10(last[0]),
+      // In each axis's own coordinates, which is log10 of the value on a log
+      // axis and the value itself on a linear one. Mixing them puts the label
+      // thousands of decades off-plot -- invisible, and silently so.
+      x: at(xType, x[last[1]]),
+      y: at(yType, last[0]),
       text: s.name,
       showarrow: false,
       xanchor: "left",
@@ -207,8 +278,8 @@ function decaySeriesChart(el, results, key, title, yLabel) {
   }
 
   Plotly.react(el, traces, baseLayout(title, label, yLabel, {
-    xaxis: { type: "log" },
-    yaxis: { type: "log", range: [Math.log10(floor), Math.log10(peak * 4)] },
+    xaxis: { type: xType },
+    yaxis: { type: yType, range: span(yType, floor, peak, 4) },
     layout: { annotations },
   }), CONFIG);
 }
@@ -243,7 +314,7 @@ function inventoryChart(el, results) {
     "atom density [atom/barn-cm]",
     "",
     {
-      xaxis: { type: "log" },
+      xaxis: { type: scaleOf(el.id, "x") },
       yaxis: { automargin: true, gridcolor: "rgba(0,0,0,0)" },
       layout: { showlegend: false, margin: { l: 80, r: 24, t: 40, b: 48 } },
     },
@@ -265,18 +336,24 @@ export function drawPhotons(results, stepIndex) {
     Plotly.purge(el);
     return;
   }
+  const xType = scaleOf(el.id, "x");
+  const yType = scaleOf(el.id, "y");
   const peak = Math.max(...intensities);
   // Five decades down from the strongest; below that a line is not physics.
   const floor = peak / 1e5;
+  // Where a stem starts. The bottom of the visible range, which is the floor on
+  // a log axis and zero on a linear one -- starting at the floor on linear
+  // would hang every line above the axis.
+  const base = yType === "log" ? floor : 0;
 
   const x = [];
   const y = [];
   for (let i = 0; i < energies.length; i++) {
-    if (intensities[i] < floor) continue;
+    if (yType === "log" && intensities[i] < floor) continue;
     // MeV reads better than eV across a gamma spectrum.
     const e = energies[i] / 1e6;
     x.push(e, e, null);
-    y.push(floor, intensities[i], null);
+    y.push(base, intensities[i], null);
   }
 
   Plotly.react(el, [{
@@ -300,11 +377,12 @@ export function drawPhotons(results, stepIndex) {
     "photon energy [MeV]",
     "emission rate [photon/s]",
     {
-      // Log energy. A gamma spectrum is dense below 100 keV and sparse above
-      // 1 MeV, so a linear axis stacks most of the lines on top of each other
-      // at the origin and wastes the rest of the panel.
-      xaxis: { type: "log" },
-      yaxis: { type: "log", range: [Math.log10(floor), Math.log10(peak * 8)] },
+      // Log energy by default. A gamma spectrum is dense below 100 keV and
+      // sparse above 1 MeV, so linear stacks most of the lines on top of each
+      // other at the origin -- which is occasionally the view someone wants of
+      // the high-energy end, hence the toggle.
+      xaxis: { type: xType },
+      yaxis: { type: yType, range: span(yType, floor, peak, 8) },
       layout: { showlegend: false, hovermode: "closest" },
     },
   ), CONFIG);
@@ -327,6 +405,8 @@ export function drawSpectrum(boundaries, values) {
   const el = document.getElementById("plot-spectrum");
   if (!el) return;
   const m = mode();
+  const xType = scaleOf(el.id, "x");
+  const yType = scaleOf(el.id, "y");
 
   // A step per group, at the height its lethargy width gives it.
   const x = [];
@@ -354,7 +434,9 @@ export function drawSpectrum(boundaries, values) {
     type: "scatter",
     mode: "lines",
     x,
-    y: y.map((v) => Math.max(v, floor)),
+    // Clamped to the floor only on a log axis, where a zero-flux group would
+    // otherwise drop the trace to negative infinity and break the fill.
+    y: yType === "log" ? y.map((v) => Math.max(v, floor)) : y,
     line: { width: 2, color: SERIES[m][0], shape: "linear" },
     fill: "tozeroy",
     fillcolor: m === "dark" ? "rgba(57,135,229,0.16)" : "rgba(42,120,214,0.12)",
@@ -364,8 +446,8 @@ export function drawSpectrum(boundaries, values) {
     "energy [eV]",
     "flux per unit lethargy [normalised]",
     {
-      xaxis: { type: "log" },
-      yaxis: { type: "log", range: [Math.log10(floor), Math.log10(peak * 2)] },
+      xaxis: { type: xType },
+      yaxis: { type: yType, range: span(yType, floor, peak, 2) },
       layout: { showlegend: false, hovermode: "closest" },
     },
   ), CONFIG);
