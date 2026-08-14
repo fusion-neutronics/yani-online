@@ -1,0 +1,374 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>YANI online</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!--
+  One document, no bundler, no framework. The build inlines the wasm, the
+  wasm-bindgen glue and plotly-basic into the placeholders at the bottom, so a
+  built page is a single file that needs nothing from the network except the
+  nuclear data it fetches on demand.
+
+  Panels are ordered the way a calculation is: what is being irradiated, what
+  data describes it, what the neutrons look like, for how long, then run.
+-->
+
+<style>
+  /* Light values on :root so the palette exists unconditionally; the dark
+     block below only redefines tokens, never introduces one. */
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --ink: #1a1c1f;
+    --muted: #5c6370;
+    --line: #d8dce3;
+    --accent: #2f5fd0;
+    --warn: #9a5b00;
+    --warn-bg: #fff5e5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a;
+      --panel: #1c1f25;
+      --ink: #e8eaed;
+      --muted: #99a1ad;
+      --line: #333944;
+      --accent: #7aa2f7;
+      --warn: #e0a458;
+      --warn-bg: #2a2317;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --ink: #e8eaed;
+    --muted: #99a1ad;
+    --line: #333944;
+    --accent: #7aa2f7;
+    --warn: #e0a458;
+    --warn-bg: #2a2317;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { max-width: 78rem; margin: 0 auto 1.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); font-size: .9rem; }
+
+  main {
+    max-width: 78rem;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(20rem, 24rem) minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+  }
+  @media (max-width: 60rem) { main { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  .panel > h2 {
+    font-size: .8rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin: 0 0 .75rem;
+    font-weight: 600;
+  }
+
+  label { display: block; font-size: .85rem; margin-bottom: .65rem; }
+  label > span { display: block; color: var(--muted); margin-bottom: .2rem; }
+  input, select, button, textarea {
+    font: inherit;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: .4rem .5rem;
+    width: 100%;
+  }
+  textarea { font-family: var(--mono); font-size: .8rem; min-height: 6rem; resize: vertical; }
+  button {
+    background: var(--accent);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); border-color: var(--line); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .row { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: end; }
+  .row-3 { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; align-items: end; }
+  .inline { display: flex; gap: .5rem; }
+  .inline > * { flex: 1; }
+
+  .tabs { display: flex; gap: .25rem; margin-bottom: .75rem; }
+  .tabs button {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+    font-weight: 500;
+    font-size: .85rem;
+    padding: .3rem .6rem;
+  }
+  .tabs button[aria-selected="true"] {
+    color: var(--ink);
+    background: var(--bg);
+    border-color: var(--line);
+  }
+  [hidden] { display: none !important; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: .78rem; }
+  td.num, th.num { text-align: right; font-family: var(--mono); }
+
+  .note { font-size: .8rem; color: var(--muted); margin: .5rem 0 0; }
+  .warn {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    border-radius: 5px;
+    padding: .5rem .6rem;
+    font-size: .82rem;
+    margin-top: .75rem;
+  }
+
+  progress { width: 100%; height: .5rem; }
+  .status { font-family: var(--mono); font-size: .78rem; color: var(--muted); min-height: 1.2em; }
+
+  .plot { width: 100%; height: 24rem; }
+  .plot-wrap { overflow-x: auto; }
+</style>
+
+<header>
+  <h1>YANI online</h1>
+  <p>Nuclide inventory, activity, decay heat and decay photon lines &mdash; solved in
+     your browser, on continuous-energy data.</p>
+</header>
+
+<main>
+  <!-- ------------------------------------------------------------------ -->
+  <div>
+    <section class="panel">
+      <h2>Material</h2>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="pnnl">PNNL compendium</button>
+        <button role="tab" aria-selected="false" data-tab="custom">Build one</button>
+      </div>
+
+      <div data-panel="pnnl">
+        <label>
+          <span>Search 410 materials (PNNL-15870 Rev. 2)</span>
+          <input id="pnnl-search" type="search" placeholder="steel, concrete, water&hellip;"
+                 autocomplete="off">
+        </label>
+        <label>
+          <span>Material</span>
+          <select id="pnnl-select" size="8"></select>
+        </label>
+      </div>
+
+      <div data-panel="custom" hidden>
+        <p class="note" style="margin-top:0">
+          Element symbols expand over natural abundance, nuclide names are taken
+          literally, and chemical formulas are parsed &mdash; the same rules the
+          Python API uses.
+        </p>
+        <table>
+          <thead><tr><th>Component</th><th class="num">Fraction</th><th></th></tr></thead>
+          <tbody id="composition"></tbody>
+        </table>
+        <button class="secondary" id="add-component" style="margin-top:.5rem">
+          Add component
+        </button>
+        <div class="inline" style="margin-top:.75rem">
+          <label>
+            <span>Density</span>
+            <input id="density" type="number" value="7.87" step="any" min="0">
+          </label>
+          <label>
+            <span>Units</span>
+            <select id="density-units">
+              <option value="g/cm3">g/cm&sup3;</option>
+              <option value="kg/m3">kg/m&sup3;</option>
+              <option value="atom/barn-cm">atom/barn-cm</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span>Fractions are</span>
+          <select id="fraction-type">
+            <option value="atom">atom fractions</option>
+            <option value="mass">mass fractions</option>
+          </select>
+        </label>
+      </div>
+
+      <label style="margin-top:.5rem">
+        <span>Volume (cm&sup3;) &mdash; required for activity and decay heat</span>
+        <input id="volume" type="number" value="1000" step="any" min="0">
+      </label>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel">
+      <h2>Nuclear data</h2>
+      <p class="note" style="margin-top:0">
+        Each subsection is sourced independently, so a network can mix libraries.
+        Only libraries that publish a given subsection are offered.
+      </p>
+      <label>
+        <span>Cross sections</span>
+        <select id="data-xs"></select>
+      </label>
+      <label>
+        <span>Transmutation reactions</span>
+        <select id="data-reactions"></select>
+      </label>
+      <label>
+        <span>Decay data</span>
+        <select id="data-decay"></select>
+      </label>
+      <label>
+        <span>Fission yields</span>
+        <select id="data-fpy"></select>
+      </label>
+      <label>
+        <span>Isomeric branching</span>
+        <select id="data-branching"></select>
+      </label>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel">
+      <h2>Neutron spectrum</h2>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="preset">Preset</button>
+        <button role="tab" aria-selected="false" data-tab="groups">Group structure</button>
+      </div>
+
+      <div data-panel="preset">
+        <label>
+          <span>Shape</span>
+          <select id="spectrum-preset">
+            <option value="fusion-fw">Fusion first wall (14 MeV peaked)</option>
+            <option value="dt-point">D-T point source (unmoderated)</option>
+            <option value="fission-pwr">Fission, PWR-like</option>
+            <option value="thermal">Thermal Maxwellian</option>
+          </select>
+        </label>
+      </div>
+
+      <div data-panel="groups" hidden>
+        <label>
+          <span>Boundaries</span>
+          <select id="group-structure">
+            <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV &ndash; 1 GeV)</option>
+            <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups)</option>
+            <option value="VITAMIN-J-42">VITAMIN-J-42 (42 groups)</option>
+          </select>
+        </label>
+        <label>
+          <span>Per-group flux &mdash; one value per group, whitespace or comma separated</span>
+          <textarea id="group-flux" spellcheck="false"
+                    placeholder="1.2e10 3.4e11 &hellip;"></textarea>
+        </label>
+        <div class="status" id="group-status"></div>
+      </div>
+
+      <p class="note">
+        The shape is normalised, so the magnitude comes from each pulse's flux
+        below.
+      </p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel">
+      <h2>Irradiation schedule</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th class="num">Flux (n/cm&sup2;/s)</th>
+            <th class="num">Duration</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="schedule"></tbody>
+      </table>
+      <div class="inline" style="margin-top:.5rem">
+        <button class="secondary" id="add-pulse">Add pulse</button>
+        <button class="secondary" id="add-cooldown">Add cooldown</button>
+      </div>
+      <p class="note">
+        A cooldown's duration is the length of <em>that step</em>, not a
+        cumulative time, so log-spaced sampling means differencing the times you
+        want.
+      </p>
+    </section>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <div>
+    <section class="panel">
+      <h2>Data</h2>
+      <div id="budget" class="status">Choose a material to see what needs downloading.</div>
+      <progress id="progress" value="0" max="1" hidden></progress>
+      <div class="inline" style="margin-top:.75rem">
+        <button id="load-data">Download nuclear data</button>
+        <button id="run" class="secondary" disabled>Run</button>
+      </div>
+      <div class="status" id="status" style="margin-top:.5rem"></div>
+      <div class="warn" id="warning" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Results</h2>
+      <div id="results-empty" class="note" style="margin-top:0">
+        Nothing yet. Set up a material and a schedule, download the data, then run.
+      </div>
+      <div id="results" hidden>
+        <div class="plot-wrap"><div class="plot" id="plot-activity"></div></div>
+        <div class="plot-wrap"><div class="plot" id="plot-heat"></div></div>
+        <div class="plot-wrap"><div class="plot" id="plot-inventory"></div></div>
+        <div class="plot-wrap"><div class="plot" id="plot-photons"></div></div>
+        <label style="margin-top:.5rem">
+          <span>Photon spectrum at step <output id="photon-step-label"></output></span>
+          <input id="photon-step" type="range" min="0" max="0" value="0" step="1">
+        </label>
+        <div class="inline" style="margin-top:1rem">
+          <button class="secondary" id="export">Export this session as one HTML file</button>
+        </div>
+        <p class="note">
+          The exported file carries the solver, the plots and the cross sections
+          this run actually loaded, so it opens and re-plots with no network.
+        </p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script type="module">
+// The build replaces these with base64 payloads; in the dev tree they are
+// fetched from disk so the page can be served straight from src/ without a
+// build step. Both paths end at the same three byte arrays.
+const WASM_B64 = "__WASM_B64__";
+const WASM_JS = "__WASM_JS__";
+const PLOTLY_GZ_B64 = "__PLOTLY_GZ_B64__";
+
+__APP_JS__
+</script>
