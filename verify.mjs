@@ -88,12 +88,13 @@ async function main() {
   await page.fill("#density", "7.874");
   await page.fill("#volume", "1000");
 
-  await page.click("#load-data");
+  // One button: Run fetches whatever is missing, then solves.
+  await page.click("#run");
   await page.waitForFunction(
-    () => !document.getElementById("run").disabled,
-    null, { timeout: 180000 },
+    () => document.getElementById("status").textContent.startsWith("Done"),
+    null, { timeout: 300000 },
   );
-  ok(`data loaded (${served} fixture responses, ${missed} 404s survived)`);
+  ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
 
   const warning = await page.textContent("#warning");
   if (!/No cross sections published for/.test(warning || "")) {
@@ -102,12 +103,16 @@ async function main() {
     ok("missing nuclides are named in the warning");
   }
 
+  // Re-running must not refetch. The data a run needs is decided by the
+  // material, so iterating on a schedule has to be free.
+  const before = served + missed;
   await page.click("#run");
   await page.waitForFunction(
     () => document.getElementById("status").textContent.startsWith("Done"),
     null, { timeout: 120000 },
   );
-  ok("transmutation completes");
+  if (served + missed === before) ok("a second run refetches nothing");
+  else fail(`second run made ${served + missed - before} requests; should make none`);
 
   // The charts have to have actually drawn, not merely been asked to.
   for (const id of ["plot-activity", "plot-heat", "plot-inventory", "plot-photons"]) {

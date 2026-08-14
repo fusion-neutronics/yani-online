@@ -98,8 +98,12 @@ for (const [name, preset] of Object.entries(PRESETS)) {
 
 const state = {
   session: null,
-  required: [],       // nuclides needing cross sections
-  loadedData: false,
+  chainLoaded: false,
+  // Nuclides whose cross sections are already in the session. Checked before
+  // every fetch so changing a schedule, a spectrum or the volume re-solves
+  // without touching the network, and changing the material fetches only the
+  // difference.
+  haveNuclide: new Set(),
   results: null,
   // A year of irradiation, then cooling sampled log-spaced from an hour to ten
   // years. A single cooldown step is a defensible default and a useless plot:
@@ -347,26 +351,68 @@ async function refreshBudget() {
     return;
   }
   if (!state.chainLoaded) {
-    $("budget").textContent = "Download the data to see the nuclide count.";
+    $("budget").textContent = "Run to fetch the chain and see the nuclide count.";
     return;
   }
-  state.required = JSON.parse(state.session.requiredNuclides());
+  const required = JSON.parse(state.session.requiredNuclides());
+  const wanted = required.filter((n) => !state.haveNuclide.has(n));
+  $("budget").textContent = wanted.length
+    ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
+    : `${required.length} nuclides needed, all held.`;
+}
+
+/// Fetch whatever the current material needs that is not already held.
+///
+/// Called by `run`, not by a button. The data a calculation needs is decided by
+/// its material, so a separate "download" step could only ever be right until
+/// the material changed -- and then it silently was not, which is worse than
+/// slow. Recomputing here means the set can never be stale.
+///
+/// Already-loaded nuclides are skipped, so iterating on a schedule or a
+/// spectrum costs nothing after the first run.
+async function ensureData() {
+  if (!state.chainLoaded) {
+    await loadChain(state.session);
+    state.chainLoaded = true;
+  }
+  const required = JSON.parse(state.session.requiredNuclides());
+  const wanted = required.filter((n) => !state.haveNuclide.has(n));
   $("budget").textContent =
-    `${state.required.length} nuclides need cross sections. ` +
-    `Fetched once, then cached by the browser.`;
+    `${required.length} nuclides needed` +
+    (wanted.length ? `, ${wanted.length} still to fetch.` : ", all held.");
+  if (!wanted.length) return;
+
+  const { held, missing } = await loadCrossSections(state.session, wanted);
+  for (const n of wanted) state.haveNuclide.add(n);
+  if (missing.length) {
+    // Named, not just counted: which nuclides are missing decides whether the
+    // answer is usable. A gap in a trace activation product is noise; a gap in
+    // something the material is made of is not.
+    const shown = missing.slice(0, 12).join(", ");
+    warn(
+      `No cross sections published for ${missing.length} of ${wanted.length} ` +
+      `nuclides: ${shown}${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
+      `They react at zero, so anything downstream of them is missing from the ` +
+      `result rather than wrong.`,
+    );
+  }
+  setStatus(`Loaded ${(held / 1048576).toFixed(0)} MB.`);
 }
 
 async function run() {
   const btn = $("run");
   btn.disabled = true;
   warn("");
-  setStatus("Solving…");
+  $("progress").hidden = false;
   // Yield so the status paints before the solve blocks this thread. The solve
   // is synchronous inside wasm; moving it to a Worker is the next step, and is
   // what will keep the UI alive on a full closure.
   await new Promise((r) => setTimeout(r, 0));
   try {
     applyMaterial(state.session);
+    await ensureData();
+    setStatus("Solving…");
+    await new Promise((r) => setTimeout(r, 0));
     const spectrum = currentSpectrum();
     const schedule = currentSchedule(state.session);
     const out = state.session.run(
@@ -388,6 +434,7 @@ async function run() {
     setStatus("");
   } finally {
     btn.disabled = false;
+    $("progress").hidden = true;
   }
 }
 
@@ -536,44 +583,6 @@ async function main() {
   $("add-cooldown").addEventListener("click", () => {
     state.schedule.push({ kind: "cooldown", value: 1, unit: "d" });
     renderSchedule();
-  });
-
-  $("load-data").addEventListener("click", async () => {
-    const btn = $("load-data");
-    btn.disabled = true;
-    warn("");
-    $("progress").hidden = false;
-    try {
-      applyMaterial(state.session);
-      await loadChain(state.session);
-      state.chainLoaded = true;
-      state.required = JSON.parse(state.session.requiredNuclides());
-      $("budget").textContent = `${state.required.length} nuclides need cross sections.`;
-      const { held, missing } = await loadCrossSections(state.session, state.required);
-      state.loadedData = true;
-      setStatus(`Loaded ${(held / 1048576).toFixed(0)} MB across ` +
-                `${state.session.fileCount()} files.`);
-      if (missing.length) {
-        // Named, not just counted: which nuclides are missing decides whether
-        // the answer is usable. A gap in a trace activation product is noise;
-        // a gap in something the material is made of is not.
-        const shown = missing.slice(0, 12).join(", ");
-        warn(
-          `No cross sections published for ${missing.length} of ` +
-          `${state.required.length} nuclides: ${shown}` +
-          `${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
-          `They react at zero, so anything downstream of them is missing from ` +
-          `the result rather than wrong.`,
-        );
-      }
-      $("run").disabled = false;
-    } catch (e) {
-      warn(String(e.message || e));
-      setStatus("");
-    } finally {
-      btn.disabled = false;
-      $("progress").hidden = true;
-    }
   });
 
   $("run").addEventListener("click", run);
