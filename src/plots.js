@@ -68,6 +68,11 @@ function baseLayout(title, xLabel, yLabel, extra = {}) {
       linecolor: ink.grid,
       ticks: "outside",
       tickcolor: ink.grid,
+      exponentformat: "power",
+      // A schedule spanning under a decade gets Plotly's minor ticks, which
+      // label 9,1,2,...,10 -- the leading 9 belonging to the decade below and
+      // reading as an error. Majors only.
+      minor: { ticks: "" },
       ...extra.xaxis,
     },
     yaxis: {
@@ -77,6 +82,10 @@ function baseLayout(title, xLabel, yLabel, extra = {}) {
       linecolor: ink.grid,
       ticks: "outside",
       tickcolor: ink.grid,
+      // Powers of ten, not SI suffixes. Plotly's default renders 1e14 Bq as
+      // "100T", which is the wrong register for this and ambiguous besides --
+      // "B" reads as either billion or becquerel.
+      exponentformat: "power",
       ...extra.yaxis,
     },
     // Crosshair + shared tooltip: an HTML chart is interactive by default, and
@@ -167,9 +176,35 @@ function decaySeriesChart(el, results, key, title, yLabel) {
       showarrow: false,
       xanchor: "left",
       xshift: 8,
+      yshift: 0,
       font: { size: 11, color: INK[m].secondary },
     };
   }).filter(Boolean);
+
+  // Short-lived nuclides all fall through the floor at the same step, so their
+  // labels land on the same x and overlap into an unreadable stack -- and a
+  // label that cannot be read is not the relief the low-contrast hues are
+  // relying on. Separate them vertically, in pixels, since the gap that matters
+  // is a line of text rather than a distance in decades.
+  //
+  // Pushed apart within a column rather than nudged globally: a label must stay
+  // next to the line it names, or the direct labelling stops meaning anything.
+  const LINE = 14;
+  const columns = new Map();
+  for (const a of annotations) {
+    const column = columns.get(a.x) || [];
+    column.push(a);
+    columns.set(a.x, column);
+  }
+  for (const column of columns.values()) {
+    if (column.length < 2) continue;
+    // Highest value first, then step down, so the order on screen matches the
+    // order of the lines arriving at that point.
+    column.sort((p, q) => q.y - p.y);
+    column.forEach((a, k) => {
+      a.yshift = ((column.length - 1) / 2 - k) * LINE;
+    });
+  }
 
   Plotly.react(el, traces, baseLayout(title, label, yLabel, {
     xaxis: { type: "log" },
@@ -265,6 +300,10 @@ export function drawPhotons(results, stepIndex) {
     "photon energy [MeV]",
     "emission rate [photon/s]",
     {
+      // Log energy. A gamma spectrum is dense below 100 keV and sparse above
+      // 1 MeV, so a linear axis stacks most of the lines on top of each other
+      // at the origin and wastes the rest of the panel.
+      xaxis: { type: "log" },
       yaxis: { type: "log", range: [Math.log10(floor), Math.log10(peak * 8)] },
       layout: { showlegend: false, hovermode: "closest" },
     },
