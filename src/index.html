@@ -61,6 +61,18 @@
   header { max-width: 78rem; margin: 0 auto 1.5rem; }
   h1 { font-size: 1.35rem; margin: 0 0 .25rem; font-weight: 600; }
   header p { margin: 0; color: var(--muted); font-size: .9rem; }
+  header p + p { margin-top: .4rem; }
+
+  a { color: var(--accent); }
+  /* The tokens carry the theme, so an inline command reads as one in both. */
+  code {
+    font-family: var(--mono);
+    font-size: .95em;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: .05rem .3rem;
+  }
 
   main {
     max-width: 78rem;
@@ -174,6 +186,14 @@
   <h1>YANI online</h1>
   <p>Nuclide inventory, activity, decay heat and decay photon lines, solved in
      your browser, on continuous-energy data.</p>
+  <p>
+    The browser front end for
+    <a href="https://fusion-neutronics.github.io/yani/">YANI</a> &mdash; the same
+    solver, compiled to wasm. To run it locally instead, scripted and against
+    data you already hold, <code>pip install yani</code>; the
+    <a href="https://fusion-neutronics.github.io/yani/">documentation</a> covers
+    the Python API.
+  </p>
 </header>
 
 <main>
