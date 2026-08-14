@@ -68,6 +68,14 @@ async function main() {
 
   const errors = [];
   page.on("pageerror", (e) => errors.push(`PAGEERROR ${e.message}`));
+  // The page falls back to solving on the main thread when a Worker cannot be
+  // made, and says so. That fallback is there for browsers that refuse blob
+  // workers on file://, not for this one: taking it here is the regression the
+  // worker exists to prevent, and it is invisible in the result otherwise.
+  const fellBack = [];
+  page.on("console", (m) => {
+    if (/falling back to this thread|no Worker available/.test(m.text())) fellBack.push(m.text());
+  });
   // The 404s are deliberate -- this fixture set covers a handful of nuclides
   // and the chain names hundreds -- so the browser logs one per miss. Filtering
   // them keeps the check meaningful; anything else is a real error.
@@ -87,7 +95,10 @@ async function main() {
   const foreign = [];
   page.on("request", (r) => {
     const url = r.url();
-    if (url.startsWith("file://") || url.startsWith(ORIGIN)) return;
+    // blob: is the page reading its own bytes back -- the worker source and the
+    // wasm glue are handed to the browser as blobs because a Worker takes a URL
+    // and a one-file page has no file to give it. Nothing leaves the machine.
+    if (url.startsWith("file://") || url.startsWith("blob:") || url.startsWith(ORIGIN)) return;
     foreign.push(url);
   });
   await page.route(`${ORIGIN}/**`, async (route) => {
@@ -107,6 +118,14 @@ async function main() {
   await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
   ok("page boots and the solver starts");
 
+  // Where the solver started, which is the whole point of the worker: a page
+  // that boots and answers is not evidence of anything if it is answering from
+  // the thread that paints.
+  const workers = page.workers();
+  if (fellBack.length) fail(`fell back to the main thread: ${fellBack[0]}`);
+  else if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
+  else fail("no Worker was created -- the solve would block the UI");
+
   if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though
   // it cannot cover the whole closure.
@@ -115,13 +134,50 @@ async function main() {
   await page.fill("#density", "7.874");
   await page.fill("#volume", "1000");
 
-  // One button: Run fetches whatever is missing, then solves.
+  // Count frames while the run happens, and count separately those painted
+  // while the solve is in flight. A solve on the main thread paints none: the
+  // status says "Solving" and then nothing moves until wasm returns. So the
+  // second number is a direct test of where the solve ran, and unlike a timing
+  // threshold it does not depend on how big the fixture set is.
+  //
+  // Measured inside the page rather than by polling over CDP: the fetch phase
+  // makes over a thousand intercepted requests, and the interception delays
+  // replies on the same channel by seconds, which reads as a freeze that the
+  // page is not having.
+  await page.evaluate(() => {
+    const status = document.getElementById("status");
+    const live = { frames: 0, solving: 0, worstGap: 0, last: performance.now() };
+    window.__liveness = live;
+    const tick = () => {
+      const now = performance.now();
+      live.worstGap = Math.max(live.worstGap, now - live.last);
+      live.last = now;
+      live.frames++;
+      if (status.textContent.startsWith("Solving")) live.solving++;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+
   await page.click("#run");
   await page.waitForFunction(
     () => document.getElementById("status").textContent.startsWith("Done"),
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+
+  const live = await page.evaluate(() => window.__liveness);
+  if (!live.frames) {
+    fail("no frames were painted at all -- liveness could not be measured");
+  } else if (!live.solving) {
+    fail("no frame was painted while the solve was in flight: it ran on the main thread");
+  } else {
+    // The worst gap is reported rather than gated. Plotting four charts is
+    // main-thread work by nature and costs a couple of hundred milliseconds;
+    // the number worth watching is whether it grows, not whether it is zero.
+    ok(`UI stayed live: ${live.solving} frames painted during the solve, ` +
+       `worst gap ${live.worstGap.toFixed(0)} ms`);
+  }
 
   const warning = await page.textContent("#warning");
   if (!/No cross sections published for/.test(warning || "")) {
@@ -162,6 +218,36 @@ async function main() {
   await page.screenshot({ path: "verify-dark.png", fullPage: true });
   ok("screenshots written: verify-light.png, verify-dark.png");
   }  // haveFixtures
+
+  // The fallback, which nothing else exercises: a browser that refuses to make
+  // a Worker out of a blob URL on a file:// origin gets the same solver run on
+  // the main thread, and a page that boots is the difference between slow and
+  // broken. It is only reachable by pretending to be such a browser, so it can
+  // rot silently -- which is exactly why it is checked.
+  const noWorkers = await browser.newPage();
+  const fallbackErrors = [];
+  noWorkers.on("pageerror", (e) => fallbackErrors.push(e.message));
+  await noWorkers.addInitScript(() => {
+    window.Worker = function () {
+      throw new DOMException("Script cannot be accessed from origin 'null'", "SecurityError");
+    };
+  });
+  await noWorkers.goto(`file://${process.cwd()}/dist/index.html`);
+  try {
+    await noWorkers.waitForFunction(
+      () => document.getElementById("status").textContent.startsWith("Ready"),
+      null, { timeout: 60000 },
+    );
+    const materials = await noWorkers.$$eval("#pnnl-select option", (o) => o.length);
+    if (materials > 0 && !fallbackErrors.length) {
+      ok(`without Workers the page still starts (${materials} materials listed)`);
+    } else {
+      fail(`the no-Worker fallback started badly: ${fallbackErrors[0] || "no materials listed"}`);
+    }
+  } catch {
+    fail("the page does not start when Workers are unavailable");
+  }
+  await noWorkers.close();
 
   // The single-file property, checked by behaviour rather than by text.
   if (foreign.length === 0) {

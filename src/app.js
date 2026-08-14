@@ -1,8 +1,14 @@
 // Application logic: set up a calculation, fetch exactly the data it needs,
 // run it off the main thread, hand the results to the plots.
 //
-// Loaded as a module from index.html, which supplies WASM_B64, WASM_JS and
-// PLOTLY_GZ_B64 as base64 payloads.
+// Loaded as a module from index.html, which supplies WASM_B64, WASM_JS,
+// WORKER_JS and PLOTLY_GZ_B64 as inlined payloads.
+//
+// The solver itself lives in a Worker (src/worker.js); everything here is the
+// page around it. The division is: this thread fetches, because fetching is
+// waiting and the data origin is answered from a cache edge, and the worker
+// holds the wasm session, because parsing a chain and solving a network are
+// the parts that would otherwise stop the page dead for the duration.
 
 import { drawAll, drawPhotons } from "./plots.js";
 
@@ -97,7 +103,7 @@ for (const [name, preset] of Object.entries(PRESETS)) {
 // --- state ----------------------------------------------------------------
 
 const state = {
-  session: null,
+  solver: null,
   chainLoaded: false,
   // Nuclides whose cross sections are already in the session. Checked before
   // every fetch so changing a schedule, a spectrum or the volume re-solves
@@ -153,17 +159,136 @@ async function gunzipB64(b64) {
   return new Response(stream).text();
 }
 
-async function bootWasm() {
-  // The glue is a module, so it is imported from a blob URL rather than
-  // written to disk. `init` takes a synthetic Response so instantiateStreaming
-  // works without a network round-trip for a payload we already hold.
-  const glue = WASM_JS.startsWith("__") ? await (await fetch("./yani_wasm.js")).text() : WASM_JS;
-  const mod = await import(URL.createObjectURL(new Blob([glue], { type: "application/javascript" })));
-  const bytes = WASM_B64.startsWith("__")
-    ? new Uint8Array(await (await fetch("./yani_wasm_bg.wasm")).arrayBuffer())
-    : b64ToBytes(WASM_B64);
-  await mod.default(new Response(bytes, { headers: { "Content-Type": "application/wasm" } }));
-  return new mod.YaniSession();
+// --- the solver, and where it runs ----------------------------------------
+
+/// One end of the message protocol in worker.js, with the ids and the promises
+/// hidden behind ordinary method calls.
+///
+/// Every method is async because the solver is not on this thread. That is the
+/// whole cost of the move, and it is paid here rather than at the call sites,
+/// which read as they did.
+class Solver {
+  constructor(host) {
+    this.host = host;
+    this.pending = new Map();
+    this.nextId = 1;
+    // Set once the far side is gone. A worker that dies -- out of memory on a
+    // large closure is the way it would -- takes its session with it, so every
+    // later call is answered with the same error rather than left hanging.
+    this.dead = null;
+    host.onmessage = ({ data }) => {
+      const entry = this.pending.get(data.id);
+      if (!entry) return;
+      this.pending.delete(data.id);
+      if (data.error === undefined) entry.resolve(data.value);
+      else entry.reject(new Error(data.error));
+    };
+    // Every call in flight dies with it, and a promise that never settles is a
+    // UI stuck on "Solving…" with nothing to report.
+    host.onerror = (e) => this.fail(new Error(e.message || "the solver stopped"));
+  }
+
+  fail(error) {
+    this.dead = error;
+    for (const { reject } of this.pending.values()) reject(error);
+    this.pending.clear();
+  }
+
+  call(method, args = [], transfer = []) {
+    if (this.dead) return Promise.reject(this.dead);
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.host.postMessage({ id, method, args }, transfer);
+    });
+  }
+
+  init(payload) { return this.call("init", [payload]); }
+  pnnlNames() { return this.call("pnnlNames"); }
+  pnnlSearch(query) { return this.call("pnnlSearch", [query]); }
+  groupStructure(name) { return this.call("groupStructure", [name]); }
+  requiredNuclides() { return this.call("requiredNuclides"); }
+  durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
+  pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
+  buildMaterial(...args) { return this.call("buildMaterial", args); }
+  loadChain() { return this.call("loadChain"); }
+  run(spectraJson, scheduleJson) { return this.call("run", [spectraJson, scheduleJson]); }
+
+  // The two that hand over data. The buffers are transferred rather than
+  // copied, so a few hundred MB of cross sections cross for free -- and are
+  // detached here afterwards, which is why the byte count comes back from the
+  // other side rather than being measured on this one.
+  addChainSections(sections) {
+    return this.call("addChainSections", [sections], sections.map((s) => s.bytes.buffer));
+  }
+  addNuclideData(items) {
+    return this.call("addNuclideData", [items], items.map((i) => i.bytes.buffer));
+  }
+}
+
+/// Run worker.js on this thread, behind the interface a Worker presents.
+///
+/// For browsers that refuse to make a Worker out of a blob URL on a `file://`
+/// origin. The solve blocks the page exactly as it did before there was a
+/// worker, which is bad; a page that does not run at all is worse. Messages
+/// are delivered in a microtask so the ordering matches a real worker's, and
+/// the payloads are passed by reference rather than cloned, which nothing here
+/// depends on either way.
+function inPageHost(source) {
+  const scope = {
+    onmessage: null,
+    postMessage: (msg) => queueMicrotask(() => host.onmessage?.({ data: msg })),
+  };
+  const host = {
+    onmessage: null,
+    onerror: null,
+    postMessage: (msg) => queueMicrotask(() => scope.onmessage?.({ data: msg })),
+    terminate() {},
+  };
+  new Function("self", source)(scope);
+  return host;
+}
+
+/// Start the solver, in a Worker if the browser allows one.
+///
+/// The failure is not always thrown by the constructor -- a worker can be
+/// created and then fail to load its script, which arrives as an error event
+/// mid-`init` -- so the fallback is placed after the first successful call
+/// rather than after the construction.
+async function bootSolver() {
+  const glueSource = WASM_JS.startsWith("__")
+    ? await (await fetch("./yani_wasm.js")).text()
+    : WASM_JS;
+  const workerSource = WORKER_JS.startsWith("__")
+    ? await (await fetch("./worker.js")).text()
+    : WORKER_JS;
+  // Not transferred: if the worker turns out to be unusable, the fallback
+  // needs these bytes intact, and one 3.4 MB copy at boot is not worth the
+  // risk of handing them away first.
+  const wasm = WASM_B64.startsWith("__")
+    ? { wasmBytes: await (await fetch("./yani_wasm_bg.wasm")).arrayBuffer() }
+    : { wasmB64: WASM_B64 };
+  const payload = { glueSource, ...wasm };
+
+  let worker = null;
+  try {
+    worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: "application/javascript" })));
+  } catch (e) {
+    console.warn("no Worker available:", e);
+  }
+  if (worker) {
+    try {
+      const solver = new Solver(worker);
+      await solver.init(payload);
+      return solver;
+    } catch (e) {
+      worker.terminate();
+      console.warn("the solver worker failed to start, falling back to this thread:", e);
+    }
+  }
+  const solver = new Solver(inPageHost(workerSource));
+  await solver.init(payload);
+  return solver;
 }
 
 async function bootPlotly() {
@@ -210,7 +335,7 @@ async function fetchAll(jobs, onProgress, limit = 12) {
   return results;
 }
 
-async function loadChain(session) {
+async function loadChain(solver) {
   const jobs = [];
   for (const [subsection, files] of Object.entries(CHAIN_SECTIONS)) {
     const library = DEFAULTS[subsection] && $(`data-${shortKey(subsection)}`)?.value;
@@ -226,10 +351,13 @@ async function loadChain(session) {
   }
   setStatus("Fetching the transmutation chain…");
   const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
+  const sections = [];
   jobs.forEach((job, i) => {
-    if (bytes[i]) session.addChainSection(job.subsection, job.file, bytes[i]);
+    if (bytes[i]) sections.push({ subsection: job.subsection, file: job.file, bytes: bytes[i] });
   });
-  const n = session.loadChain();
+  await solver.addChainSections(sections);
+  setStatus("Parsing the transmutation chain…");
+  const n = await solver.loadChain();
   setStatus(`Chain loaded: ${n.toLocaleString()} nuclides.`);
   return n;
 }
@@ -237,7 +365,7 @@ async function loadChain(session) {
 const shortKey = (subsection) =>
   ({ decay: "decay", reactions: "reactions", fission_yields: "fpy", branching: "branching" }[subsection]);
 
-async function loadCrossSections(session, nuclides) {
+async function loadCrossSections(solver, nuclides) {
   const library = $("data-xs").value;
   const jobs = [];
   for (const nuclide of nuclides) {
@@ -259,16 +387,13 @@ async function loadCrossSections(session, nuclides) {
   }
   setStatus(`Fetching cross sections for ${nuclides.length} nuclides…`);
   const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
-  let held = 0;
+  const items = [];
   const missing = new Set();
   jobs.forEach((job, i) => {
-    if (bytes[i]) {
-      session.addNuclideData(job.nuclide, job.file, bytes[i]);
-      held += bytes[i].length;
-    } else {
-      missing.add(job.nuclide);
-    }
+    if (bytes[i]) items.push({ nuclide: job.nuclide, file: job.file, bytes: bytes[i] });
+    else missing.add(job.nuclide);
   });
+  const held = await solver.addNuclideData(items);
   return { held, missing: [...missing] };
 }
 
@@ -278,30 +403,29 @@ function activeTab(panel) {
   return panel.querySelector('[role="tab"][aria-selected="true"]').dataset.tab;
 }
 
-function applyMaterial(session) {
+function applyMaterial(solver) {
   const volume = Number($("volume").value);
   const materialPanel = document.querySelector(".panel");
   if (activeTab(materialPanel) === "pnnl") {
     const name = $("pnnl-select").value;
     if (!name) throw new Error("choose a material");
-    session.pnnlMaterial(name, volume);
-  } else {
-    const composition = {};
-    for (const { name, fraction } of state.composition) {
-      if (name.trim()) composition[name.trim()] = fraction;
-    }
-    if (!Object.keys(composition).length) throw new Error("the composition is empty");
-    session.buildMaterial(
-      JSON.stringify(composition),
-      Number($("density").value),
-      $("density-units").value,
-      $("fraction-type").value,
-      volume,
-    );
+    return solver.pnnlMaterial(name, volume);
   }
+  const composition = {};
+  for (const { name, fraction } of state.composition) {
+    if (name.trim()) composition[name.trim()] = fraction;
+  }
+  if (!Object.keys(composition).length) throw new Error("the composition is empty");
+  return solver.buildMaterial(
+    JSON.stringify(composition),
+    Number($("density").value),
+    $("density-units").value,
+    $("fraction-type").value,
+    volume,
+  );
 }
 
-function currentSpectrum() {
+async function currentSpectrum() {
   const panel = [...document.querySelectorAll(".panel")].find((p) =>
     p.querySelector("#spectrum-preset, #group-structure"));
   if (activeTab(panel) === "preset") {
@@ -312,7 +436,7 @@ function currentSpectrum() {
   if (values.some(Number.isNaN)) throw new Error("the pasted flux has a non-numeric entry");
   // Boundaries come from the wasm side so the browser and the wheel agree on
   // what "CCFE-709" means, rather than this file carrying a second copy.
-  const boundaries = JSON.parse(state.session.groupStructure($("group-structure").value));
+  const boundaries = await state.solver.groupStructure($("group-structure").value);
   if (values.length !== boundaries.length - 1) {
     throw new Error(
       `${$("group-structure").value} has ${boundaries.length - 1} groups, ` +
@@ -321,40 +445,46 @@ function currentSpectrum() {
   return { boundaries, values };
 }
 
-function currentSchedule(session) {
-  return state.schedule.map((step) => {
-    const dt = session.constructor.durationToSeconds
-      ? session.constructor.durationToSeconds(step.value, step.unit)
-      : durationToSeconds(step.value, step.unit);
-    return step.kind === "pulse"
-      ? { dt, rate: step.rate, spectrum: 0 }
-      : { dt };
-  });
-}
-
-// Mirror of yani_transmute::duration_to_seconds, used only if the wasm export
-// is unavailable. Kept in sync by the unit table in the docs.
-function durationToSeconds(value, unit) {
-  const table = { s: 1, min: 60, h: 3600, d: 86400, a: 365.25 * 86400 };
-  if (!(unit in table)) throw new Error(`unknown duration unit '${unit}'`);
-  return value * table[unit];
+/// Durations come from the solver's own unit table rather than a copy of it
+/// here: one round trip for the whole schedule, and no second definition of
+/// what "a" means to drift away from the wheel's.
+async function currentSchedule(solver) {
+  const seconds = await solver.durationsToSeconds(
+    state.schedule.map(({ value, unit }) => ({ value, unit })));
+  return state.schedule.map((step, i) =>
+    step.kind === "pulse"
+      ? { dt: seconds[i], rate: step.rate, spectrum: 0 }
+      : { dt: seconds[i] });
 }
 
 // --- run ------------------------------------------------------------------
 
+/// Report what the current material would have to download.
+///
+/// Fired by every keystroke and every dropdown, and each answer now takes a
+/// round trip, so replies can arrive out of order. `budgetToken` keeps only the
+/// newest: a stale answer describes a material the user has already moved on
+/// from, and showing it would be worse than showing nothing.
+let budgetToken = 0;
+
 async function refreshBudget() {
-  if (!state.session) return;
+  if (!state.solver) return;
+  const token = ++budgetToken;
   try {
-    applyMaterial(state.session);
+    await applyMaterial(state.solver);
   } catch {
-    $("budget").textContent = "Choose a material to see what needs downloading.";
+    if (token === budgetToken) {
+      $("budget").textContent = "Choose a material to see what needs downloading.";
+    }
     return;
   }
+  if (token !== budgetToken) return;
   if (!state.chainLoaded) {
     $("budget").textContent = "Run to fetch the chain and see the nuclide count.";
     return;
   }
-  const required = JSON.parse(state.session.requiredNuclides());
+  const required = await state.solver.requiredNuclides();
+  if (token !== budgetToken) return;
   const wanted = required.filter((n) => !state.haveNuclide.has(n));
   $("budget").textContent = wanted.length
     ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
@@ -372,17 +502,17 @@ async function refreshBudget() {
 /// spectrum costs nothing after the first run.
 async function ensureData() {
   if (!state.chainLoaded) {
-    await loadChain(state.session);
+    await loadChain(state.solver);
     state.chainLoaded = true;
   }
-  const required = JSON.parse(state.session.requiredNuclides());
+  const required = await state.solver.requiredNuclides();
   const wanted = required.filter((n) => !state.haveNuclide.has(n));
   $("budget").textContent =
     `${required.length} nuclides needed` +
     (wanted.length ? `, ${wanted.length} still to fetch.` : ", all held.");
   if (!wanted.length) return;
 
-  const { held, missing } = await loadCrossSections(state.session, wanted);
+  const { held, missing } = await loadCrossSections(state.solver, wanted);
   for (const n of wanted) state.haveNuclide.add(n);
   if (missing.length) {
     // Named, not just counted: which nuclides are missing decides whether the
@@ -404,22 +534,28 @@ async function run() {
   btn.disabled = true;
   warn("");
   $("progress").hidden = false;
-  // Yield so the status paints before the solve blocks this thread. The solve
-  // is synchronous inside wasm; moving it to a Worker is the next step, and is
-  // what will keep the UI alive on a full closure.
-  await new Promise((r) => setTimeout(r, 0));
   try {
-    applyMaterial(state.session);
+    await applyMaterial(state.solver);
     await ensureData();
-    setStatus("Solving…");
-    await new Promise((r) => setTimeout(r, 0));
-    const spectrum = currentSpectrum();
-    const schedule = currentSchedule(state.session);
-    const out = state.session.run(
-      JSON.stringify([{ boundaries: spectrum.boundaries, values: spectrum.values }]),
-      JSON.stringify(schedule),
-    );
-    state.results = JSON.parse(out);
+    const spectrum = await currentSpectrum();
+    const schedule = await currentSchedule(state.solver);
+    // The clock is not decoration. A solve is the one operation with no
+    // progress to report -- it is a single call into wasm that returns when it
+    // is done -- and a counter that keeps counting is how someone watching can
+    // tell the page is alive rather than wedged. It ticks because the solve is
+    // no longer on this thread; before, it could not have.
+    const started = performance.now();
+    const elapsed = () => `${((performance.now() - started) / 1000).toFixed(1)} s`;
+    setStatus("Solving… 0.0 s");
+    const tick = setInterval(() => setStatus(`Solving… ${elapsed()}`), 100);
+    try {
+      state.results = await state.solver.run(
+        JSON.stringify([{ boundaries: spectrum.boundaries, values: spectrum.values }]),
+        JSON.stringify(schedule),
+      );
+    } finally {
+      clearInterval(tick);
+    }
     $("results-empty").hidden = true;
     $("results").hidden = false;
     const slider = $("photon-step");
@@ -428,7 +564,7 @@ async function run() {
     $("photon-step-label").value = state.results.length;
     drawAll(state.results);
     drawPhotons(state.results, state.results.length - 1);
-    setStatus(`Done. ${state.results.length} steps.`);
+    setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
     warn(String(e.message || e));
     setStatus("");
@@ -525,12 +661,12 @@ async function main() {
 
   setStatus("Starting the solver…");
   await bootPlotly();
-  state.session = await bootWasm();
+  state.solver = await bootSolver();
   setStatus("Ready. Choose a material, then download the data it needs.");
 
   // The compendium is compiled into the wasm, so the picker works before a
   // single byte is fetched.
-  const names = JSON.parse(state.session.constructor.pnnlNames());
+  const names = await state.solver.pnnlNames();
   const fill = (list) => {
     const select = $("pnnl-select");
     select.innerHTML = "";
@@ -541,9 +677,14 @@ async function main() {
     }
   };
   fill(names);
-  $("pnnl-search").addEventListener("input", (e) => {
+  // Searching is a round trip now, so a fast typist can outrun the answers.
+  // Only the newest is drawn, for the same reason the budget drops stale ones.
+  let searchToken = 0;
+  $("pnnl-search").addEventListener("input", async (e) => {
     const q = e.target.value.trim();
-    fill(q ? JSON.parse(state.session.constructor.pnnlSearch(q)) : names);
+    const token = ++searchToken;
+    const list = q ? await state.solver.pnnlSearch(q) : names;
+    if (token === searchToken) fill(list);
   });
   $("pnnl-select").addEventListener("change", refreshBudget);
   $("volume").addEventListener("change", refreshBudget);
