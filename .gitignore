@@ -1,0 +1,14 @@
+# Build output. `node build.mjs` regenerates it from src/ and vendor/.
+dist/
+
+# Built in core by `wasm-pack build --target web` and copied here. Not
+# committed: it is a compiled artifact of another repository at a particular
+# commit, and a stale copy would be indistinguishable from a fresh one.
+vendor/yani_wasm.js
+vendor/yani_wasm_bg.wasm
+vendor/yani_wasm*.d.ts
+
+node_modules/
+
+# Screenshots from the verification pass.
+*.png

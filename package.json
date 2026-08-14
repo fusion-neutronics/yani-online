@@ -1,0 +1,13 @@
+{
+  "name": "yani-online",
+  "private": true,
+  "type": "module",
+  "description": "Browser build of YANI: transmutation and activation, solved client-side",
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node verify.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
