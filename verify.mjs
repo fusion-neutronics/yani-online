@@ -117,6 +117,26 @@ async function main() {
   if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
   else fail("no Worker was created -- the solve would block the UI");
 
+  // The spectrum is an input, so it is drawn before anything has been run and
+  // before any nuclear data exists to draw it from. Checked here rather than
+  // after the run, because after the run a plot that only ever appeared with
+  // results would pass too.
+  const spectrumBefore = await page.$eval("#plot-spectrum", (el) => (el.data ? el.data.length : 0));
+  if (spectrumBefore > 0) ok("the neutron spectrum is plotted before any run");
+  else fail("no spectrum drawn before the run");
+
+  // And that it follows the form rather than being drawn once. A preset with a
+  // different group count is the cheapest thing to check it against.
+  await page.selectOption("#spectrum-preset", "thermal");
+  await page.waitForFunction(
+    () => document.getElementById("spectrum-status").textContent.startsWith("5 groups"),
+    null, { timeout: 5000 },
+  ).then(
+    () => ok("the spectrum follows the preset"),
+    () => fail(`the spectrum did not follow the preset: ${document && "see #spectrum-status"}`),
+  );
+  await page.selectOption("#spectrum-preset", "fusion-fw");
+
   if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though
   // it cannot cover the whole closure.

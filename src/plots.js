@@ -310,6 +310,67 @@ export function drawPhotons(results, stepIndex) {
   ), CONFIG);
 }
 
+/// The neutron spectrum, drawn from the boundaries and per-group values that
+/// would be handed to the solver.
+///
+/// Per unit lethargy, not per group. The groups here span decades of unequal
+/// width -- a preset's first group runs from 1e-5 eV to 100 eV, its last from
+/// 12 to 15 MeV -- so raw per-group values on a log axis say more about the
+/// binning than about the physics, and two group structures describing the same
+/// spectrum would draw as different shapes. Dividing by ln(E_hi/E_lo) is what
+/// makes the area under the curve proportional to flux, which is the reading
+/// anyone comparing a thermal peak against a 14 MeV one is after.
+///
+/// Drawn before any run, and redrawn on every edit: the spectrum is an input,
+/// and this is the only one whose consequences are hard to read off the form.
+export function drawSpectrum(boundaries, values) {
+  const el = document.getElementById("plot-spectrum");
+  if (!el) return;
+  const m = mode();
+
+  // A step per group, at the height its lethargy width gives it.
+  const x = [];
+  const y = [];
+  let peak = 0;
+  for (let i = 0; i < values.length; i++) {
+    const lo = boundaries[i];
+    const hi = boundaries[i + 1];
+    const lethargy = Math.log(hi / lo);
+    const height = lethargy > 0 ? values[i] / lethargy : 0;
+    peak = Math.max(peak, height);
+    x.push(lo, hi);
+    y.push(height, height);
+  }
+  if (!(peak > 0)) {
+    Plotly.purge(el);
+    return;
+  }
+  // Four decades below the peak. A group carrying a millionth of the flux is
+  // not part of the shape being chosen, and letting it set the floor flattens
+  // everything that is.
+  const floor = peak / 1e4;
+
+  Plotly.react(el, [{
+    type: "scatter",
+    mode: "lines",
+    x,
+    y: y.map((v) => Math.max(v, floor)),
+    line: { width: 2, color: SERIES[m][0], shape: "linear" },
+    fill: "tozeroy",
+    fillcolor: m === "dark" ? "rgba(57,135,229,0.16)" : "rgba(42,120,214,0.12)",
+    hovertemplate: "%{x:.3e} eV<br>%{y:.3e} per lethargy<extra></extra>",
+  }], baseLayout(
+    "Neutron spectrum",
+    "energy [eV]",
+    "flux per unit lethargy [normalised]",
+    {
+      xaxis: { type: "log" },
+      yaxis: { type: "log", range: [Math.log10(floor), Math.log10(peak * 2)] },
+      layout: { showlegend: false, hovermode: "closest" },
+    },
+  ), CONFIG);
+}
+
 export function drawAll(results) {
   decaySeriesChart(
     document.getElementById("plot-activity"),
