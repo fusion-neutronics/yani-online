@@ -27,6 +27,12 @@ git -C ../core rev-parse HEAD > vendor/CORE_COMMIT
 node build.mjs
 ```
 
+The solver was mis-reading nuclide names until recently: `Fe56` reached the
+formula parser first and came back as Fe with a subscript of 56, which expands
+over natural abundance. A single-nuclide material was quietly 8.8% short on its
+own nuclide and carried three isotopes nobody asked for. Fixed in core by
+fusion-neutronics/core#468; anything vendored before that has it.
+
 `vendor/CORE_COMMIT` records which core commit produced the solver. The page is
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
@@ -118,7 +124,7 @@ worker, so the failure it was meant to catch does not happen.
 | WebKit 26.5 | yes | **no** | runs |
 
 All three run the page end to end and agree on the answer to the last digit
-(4.0786e14 Bq peak activity for the Fe56 check).
+(4.4380e14 Bq peak activity for the Fe56 check).
 
 WebKit only started running it recently. It used to reject the solver outright
 -- *"WebAssembly.Module doesn't parse … relaxed simd instructions not
@@ -158,9 +164,11 @@ toggles for the axes a scale means something for.
 
 A full run has been verified in Chromium, Firefox and WebKit from `file://`
 against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and
-all four result plots, with a Fe56 material and the 1383 unpublished nuclides of its closure
-answered as 404s. All three give 4.0786e14 Bq peak activity, identical to the
-last digit. `node verify.mjs` is that check; it needs a local copy of the data
+all four result plots, with a Fe56 material and the 1383 unpublished nuclides of
+its closure answered as 404s. All three give 4.4380e14 Bq peak activity,
+identical to the last digit, and the same setup run through the `yani` Python
+package agrees with them to 2.1e-10 -- which is how the composition bug below
+was found. `node verify.mjs` is that check; it needs a local copy of the data
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
 one, so CI currently gates on everything up to the first solve.
 
