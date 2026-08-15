@@ -53,6 +53,25 @@ it -- fusion-neutronics/core#467 publishes the optimised `pkg/` as a build
 artifact and a release asset, which is what this repository should vendor from
 once a release carries one.
 
+## The same solver, locally
+
+This page is a front end for [YANI](https://fusion-neutronics.github.io/yani/),
+compiled to wasm. The Python package is the same solver without the browser's
+constraints -- scriptable, and against data already on disk rather than fetched
+per run:
+
+```
+pip install yani
+```
+
+The [documentation](https://fusion-neutronics.github.io/yani/) covers the API.
+
+**Download this setup as Python** writes the material, the five data sources,
+the spectrum and the schedule out as a script that reproduces them, with the
+same plots in plotly. It needs no run first -- the setup is what it carries --
+and it is generated from the form rather than templated, because a script that
+does not match what is on screen is worse than no script.
+
 ## Where the solve runs
 
 The solver is in a Worker. A transmutation is one synchronous call into wasm

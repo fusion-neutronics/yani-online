@@ -11,6 +11,7 @@
 // the parts that would otherwise stop the page dead for the duration.
 
 import { drawAll, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { pythonScript } from "./python.js";
 
 // --- nuclear data ---------------------------------------------------------
 
@@ -454,6 +455,64 @@ async function currentSchedule(solver) {
       : { dt: seconds[i] });
 }
 
+/// The form's state, resolved into plain data.
+///
+/// Everything the script generator needs and nothing it does not: no DOM, no
+/// solver handle. The one part that has to be asked for is a named group
+/// structure's boundaries, and those the generator does not use -- `Histogram`
+/// resolves the name itself -- so this stays synchronous except where the
+/// spectrum tab makes it otherwise.
+async function currentSetup() {
+  const materialPanel = document.querySelector(".panel");
+  const volume = Number($("volume").value);
+  const material = activeTab(materialPanel) === "pnnl"
+    ? { kind: "pnnl", name: $("pnnl-select").value, volume }
+    : {
+      kind: "custom",
+      composition: Object.fromEntries(
+        state.composition.filter((c) => c.name.trim()).map((c) => [c.name.trim(), c.fraction])),
+      density: Number($("density").value),
+      units: $("density-units").value,
+      fractionType: $("fraction-type").value,
+      volume,
+    };
+  if (material.kind === "pnnl" && !material.name) throw new Error("choose a material");
+  if (material.kind === "custom" && !Object.keys(material.composition).length) {
+    throw new Error("the composition is empty");
+  }
+
+  const panel = [...document.querySelectorAll(".panel")].find((p) =>
+    p.querySelector("#spectrum-preset, #group-structure"));
+  const preset = PRESETS[$("spectrum-preset").value];
+  const spectrum = activeTab(panel) === "preset"
+    ? { label: preset.label, boundaries: preset.boundaries, values: preset.values }
+    : { structure: $("group-structure").value, values: (await currentSpectrum()).values };
+
+  return {
+    libraries: {
+      xs: $("data-xs").value,
+      decay: $("data-decay").value,
+      reactions: $("data-reactions").value,
+      fission_yields: $("data-fpy").value,
+      branching: $("data-branching").value,
+    },
+    material,
+    spectrum,
+    schedule: state.schedule.map((s) => ({ ...s })),
+  };
+}
+
+/// Hand the browser a file. `download` on an anchor is the only route that
+/// works from `file://` as well as over http, which the export has to.
+function downloadFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 // --- run ------------------------------------------------------------------
 
 /// Draw the spectrum the run would use, whatever is currently selected.
@@ -760,6 +819,14 @@ async function main() {
   });
 
   $("run").addEventListener("click", run);
+  $("download-python").addEventListener("click", async () => {
+    try {
+      warn("");
+      downloadFile("yani_run.py", pythonScript(await currentSetup()), "text/x-python");
+    } catch (e) {
+      warn(`Cannot write the script: ${e.message || e}`);
+    }
+  });
   // A scale toggle redraws only the chart it belongs to. The spectrum is drawn
   // from the form, the rest from the last results, so there is nothing to
   // redraw for those until a run has happened.

@@ -141,6 +141,58 @@ async function main() {
   if (flipped === "linear") ok("an axis scale toggle changes the axis");
   else fail(`toggling the spectrum's x scale left it '${flipped}'`);
 
+  // The Python export. Checked by reading what it actually writes: the failure
+  // that matters is a script that downloads but does not describe the setup on
+  // screen, which a "did the click work" check would pass.
+  // A material first: with none chosen the export refuses, which is correct --
+  // there is no setup to describe -- and is checked immediately after.
+  await page.selectOption("#pnnl-select", { index: 0 });
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#download-python"),
+  ]);
+  const script = await new Promise((resolve, reject) => {
+    download.createReadStream().then((stream) => {
+      let text = "";
+      stream.on("data", (chunk) => { text += chunk; });
+      stream.on("end", () => resolve(text));
+      stream.on("error", reject);
+    }, reject);
+  });
+  const rows = await page.$$eval("#schedule tr", (trs) => trs.length);
+  const wants = [
+    ["import yani", /^import yani$/m],
+    ["a material", /^material = yani\./m],
+    ["the spectrum", /yani\.sources\.Histogram\(/],
+    ["the schedule", /yani\.PulseSchedule\(\[/],
+    ["the run", /material\.transmute\(schedule=schedule\)/],
+    ["plotly", /^import plotly\.graph_objects as go$/m],
+  ];
+  const missing = wants.filter(([, pattern]) => !pattern.test(script)).map(([name]) => name);
+  const steps = (script.match(/^ {4}\("(pulse|cooldown)"/gm) || []).length;
+  if (download.suggestedFilename() !== "yani_run.py") {
+    fail(`the export is named ${download.suggestedFilename()}`);
+  } else if (missing.length) {
+    fail(`the exported script is missing: ${missing.join(", ")}`);
+  } else if (steps !== rows) {
+    fail(`the exported schedule has ${steps} steps against ${rows} on screen`);
+  } else {
+    ok(`the Python export describes the setup (${steps} schedule steps)`);
+  }
+
+  // Refusing is part of the contract: an export written from an empty form
+  // would be a script that cannot run, handed over as though it could.
+  await page.click('[data-tab="custom"]');
+  const before = await page.$eval("#composition input[data-k='name']", (el) => el.value);
+  await page.fill("#composition input[data-k='name']", "");
+  await page.click("#download-python");
+  await page.waitForTimeout(200);
+  const refused = await page.$eval("#warning", (el) => !el.hidden && el.textContent);
+  if (refused && /composition is empty/.test(refused)) ok("an empty composition is refused, not exported");
+  else fail(`an empty composition exported anyway (warning: ${refused || "none"})`);
+  await page.fill("#composition input[data-k='name']", before);
+  await page.click('[data-tab="pnnl"]');
+
   // And that it follows the form rather than being drawn once. A preset with a
   // different group count is the cheapest thing to check it against.
   await page.selectOption("#spectrum-preset", "thermal");
