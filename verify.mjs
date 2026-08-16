@@ -283,6 +283,20 @@ async function main() {
     else fail(`${id} drew nothing`);
   }
 
+  // The dose chart draws only when the vendored solver reports the field, so a
+  // checkout whose vendor/ predates it skips rather than fails. Once bumped
+  // this is an assertion like the others.
+  const doseTraces = await page.$eval("#plot-dose", (el) => el.data ? el.data.length : 0);
+  if (doseTraces > 0) {
+    ok(`plot-dose drew ${doseTraces} traces`);
+    const shown = await page.$eval("#plot-dose", (el) => !el.closest(".plot-wrap").hidden);
+    if (shown) ok("the dose chart is visible");
+    else fail("the dose chart drew but stayed hidden");
+  } else {
+    const from = (await readFile("vendor/CORE_COMMIT", "utf8")).trim().slice(0, 8);
+    console.log(`skip  plot-dose: the solver vendored from core ${from} predates contact dose`);
+  }
+
   // Non-zero physics: a page that renders empty axes passes a "did it draw"
   // check and is still useless.
   const activity = await page.$eval("#plot-activity", (el) =>
