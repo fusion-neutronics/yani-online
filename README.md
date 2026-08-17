@@ -15,7 +15,10 @@ The solver is committed under `vendor/`, matching core, which commits its own
 wasm to `python/yamc/_wasm` rather than building it in CI. So a build here needs
 nothing but Node, and the Pages workflow needs no secrets.
 
-Refreshing it after a change to core:
+The vendored copy comes from a core **release**, not from a local build -- see
+the download recipe below, which gets the `wasm-opt`-optimised binary this
+environment cannot produce. Building it locally is for testing a core change
+that has not been released yet:
 
 ```bash
 # in core
@@ -27,6 +30,9 @@ git -C ../core rev-parse HEAD > vendor/CORE_COMMIT
 node build.mjs
 ```
 
+Whichever route, `node build.mjs` is what turns `vendor/` and `src/` into
+`dist/index.html`.
+
 The solver was mis-reading nuclide names until recently: `Fe56` reached the
 formula parser first and came back as Fe with a subscript of 56, which expands
 over natural abundance. A single-nuclide material was quietly 8.8% short on its
@@ -37,27 +43,36 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.90 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 3.22 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 3.37 MB |
+| wasm (base64) | 2.67 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
-| page and application code | 0.08 MB |
+| page and application code | 0.10 MB |
 
 `plotly-basic` rather than the full bundle: every chart here is scatter or bar,
 which the basic distribution covers at a quarter of the size. It is gzipped
 before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 1.87 MB for full Plotly inlined raw.
 
-The wasm is not run through `wasm-opt` in this environment (binaryen cannot be
-downloaded through the proxy), so 2.52 MB is an upper bound. Core's CI does run
-it -- fusion-neutronics/core#467 publishes the optimised `pkg/` as a build
-artifact and a release asset, which is what this repository should vendor from
-once a release carries one.
+The wasm is the `wasm-opt`-optimised build, taken from a core release rather
+than built here: binaryen cannot be downloaded through this environment's proxy,
+so a local `wasm-pack build` produces 2.52 MB where core's CI produces 2.00 MB.
+fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
+re-vendoring means downloading an asset rather than reproducing a toolchain:
+
+```bash
+gh release download yani-core-0.5.0 -R fusion-neutronics/core \
+  -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
+  pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
+```
+
+Then record which commit it came from, since the asset does not carry it:
+`git -C ../core rev-list -n 1 yani-core-0.5.0 > vendor/CORE_COMMIT`.
 
 ## The same solver, locally
 
@@ -162,9 +177,28 @@ is plotted from the moment the page loads -- it is an input, and the only one
 whose consequences cannot be read off the form. Every chart carries log/linear
 toggles for the axes a scale means something for.
 
+Results are activity, decay heat, contact dose rate, the final inventory and the
+decay photon lines. The contact dose is the odd one of the three time series: it
+is intensive, so unlike activity and decay heat it does not scale with the
+volume on the form -- the semi-infinite slab estimate cancels the geometry, and
+a bigger lump of the same material reads the same at contact. It opens on the
+total rather than a per-nuclide breakdown, with a checkbox for the breakdown,
+because the first question a dose answers is whether the thing can be handled
+and only the second is what is driving it. Absorbed dose in air at a build-up
+factor of 2.0, which is what `Material.contact_dose()` defaults to in the wheel,
+so the page and a Python run of the same setup report the same number:
+2.711e4 Gy/h against 2.710833e4 for the Fe56 check, Mn56 in both.
+Bremsstrahlung from decay electrons is not modelled, so a strong beta emitter
+reads low.
+
+The chart hides itself when `vendor/CORE_COMMIT` names a solver that predates
+the field, rather than drawing empty axes -- a dose plot with nothing in it
+reads as a material that gives no dose, which is a different and more alarming
+claim than "this build cannot tell you".
+
 A full run has been verified in Chromium, Firefox and WebKit from `file://`
 against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and
-all four result plots, with a Fe56 material and the 1383 unpublished nuclides of
+all five result plots, with a Fe56 material and the 1383 unpublished nuclides of
 its closure answered as 404s. All three give 4.4380e14 Bq peak activity,
 identical to the last digit, and the same setup run through the `yani` Python
 package agrees with them to 2.1e-10 -- which is how the composition bug below

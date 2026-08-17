@@ -1,4 +1,4 @@
-// The four charts, drawn with plotly-basic.
+// The charts, drawn with plotly-basic.
 //
 // Palette and mark specs follow the data-viz method. The categorical hues were
 // run through its validator rather than chosen by eye:

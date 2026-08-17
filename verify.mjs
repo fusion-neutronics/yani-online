@@ -166,6 +166,10 @@ async function main() {
     ["the spectrum", /yani\.sources\.Histogram\(/],
     ["the schedule", /yani\.PulseSchedule\(\[/],
     ["the run", /material\.transmute\(schedule=schedule\)/],
+    // At its defaults, which is the point: those defaults are what the page
+    // reports, so a script that passed its own would quietly disagree with the
+    // chart it is meant to reproduce.
+    ["the contact dose", /m\.contact_dose\(by_nuclide=True\)/],
     ["plotly", /^import plotly\.graph_objects as go$/m],
   ];
   const missing = wants.filter(([, pattern]) => !pattern.test(script)).map(([name]) => name);
@@ -292,6 +296,14 @@ async function main() {
     const shown = await page.$eval("#plot-dose", (el) => !el.closest(".plot-wrap").hidden);
     if (shown) ok("the dose chart is visible");
     else fail("the dose chart drew but stayed hidden");
+    // Non-zero, checked here rather than beside the activity check below so it
+    // inherits the same skip: the dose is folded against photon attenuation
+    // tables the other series never touch, so it can be zero while they are
+    // fine, and a chart drawn from an empty fold still has traces.
+    const peak = await page.$eval("#plot-dose", (el) =>
+      Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
+    if (peak > 0) ok(`peak contact dose ${peak.toExponential(3)} Gy/h`);
+    else fail("contact dose is zero -- the photon coefficient fold produced nothing");
   } else {
     const from = (await readFile("vendor/CORE_COMMIT", "utf8")).trim().slice(0, 8);
     console.log(`skip  plot-dose: the solver vendored from core ${from} predates contact dose`);

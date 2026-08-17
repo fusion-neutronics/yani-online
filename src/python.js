@@ -165,12 +165,16 @@ for _kind, _rate, (value, unit) in SCHEDULE:
 
 activity = [m.activity(by_nuclide=True) for m in steps]
 heat = [m.decay_heat(by_nuclide=True) for m in steps]
+# Left at its defaults deliberately: absorbed dose in air with a build-up factor
+# of 2.0 is exactly what the page reports, so these numbers and the browser's
+# are the same numbers. Pass dose_quantity="effective" for Sv/h instead.
+dose = [m.contact_dose(by_nuclide=True) for m in steps]
 
 print(f"{len(steps)} steps, {sum(activity[0].values()):.3e} Bq at the end of the first")
 
 # --- plots ----------------------------------------------------------------
 #
-# The same four the page draws, plus the spectrum that produced them.
+# The same ones the page draws, plus the spectrum that produced them.
 
 
 def top_nuclides(per_step, count=6):
@@ -237,6 +241,9 @@ photon_figure.update_xaxes(type="log")
 figures = {
     "activity": series_figure(activity, "Activity", "activity [Bq]"),
     "decay_heat": series_figure(heat, "Decay heat", "decay heat [W]"),
+    "contact_dose": series_figure(
+        dose, "Contact dose rate, at the surface", "absorbed dose in air [Gy/h]"
+    ),
     "inventory": inventory_figure,
     "photons": photon_figure,
 }
