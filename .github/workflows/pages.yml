@@ -9,7 +9,7 @@ name: Pages
 # commits its own wasm to python/yamc/_wasm rather than building it in CI, so
 # this workflow needs nothing beyond the default GITHUB_TOKEN. Refreshing the
 # solver is `wasm-pack build` in core and a copy into vendor/, recorded in
-# vendor/CORE_COMMIT -- see the README.
+# vendor/CORE_COMMIT -- see dev-readme.md.
 
 on:
   push:

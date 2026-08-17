@@ -270,7 +270,7 @@ function glueToClassic(source) {
 /// this worker from `file://`, and a browser that cannot is better off saying
 /// so than quietly freezing on every solve. (WebKit starts the worker and then
 /// rejects the wasm itself, which is a build flag in core rather than anything
-/// a fallback could rescue -- see the README.)
+/// a fallback could rescue -- see dev-readme.md.)
 async function bootSolver() {
   const glueSource = WASM_JS.startsWith("__")
     ? await (await fetch("./yani_wasm.js")).text()
