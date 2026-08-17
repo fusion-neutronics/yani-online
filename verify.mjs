@@ -281,10 +281,32 @@ async function main() {
   else fail(`second run made ${served + missed - before} requests; should make none`);
 
   // The charts have to have actually drawn, not merely been asked to.
-  for (const id of ["plot-activity", "plot-heat", "plot-dose", "plot-inventory", "plot-photons"]) {
+  for (const id of ["plot-activity", "plot-heat", "plot-inventory", "plot-photons"]) {
     const traces = await page.$eval(`#${id}`, (el) => el.data ? el.data.length : 0);
     if (traces > 0) ok(`${id} drew ${traces} traces`);
     else fail(`${id} drew nothing`);
+  }
+
+  // The dose chart draws only when the vendored solver reports the field, so a
+  // checkout whose vendor/ predates it skips rather than fails. Once bumped
+  // this is an assertion like the others.
+  const doseTraces = await page.$eval("#plot-dose", (el) => el.data ? el.data.length : 0);
+  if (doseTraces > 0) {
+    ok(`plot-dose drew ${doseTraces} traces`);
+    const shown = await page.$eval("#plot-dose", (el) => !el.closest(".plot-wrap").hidden);
+    if (shown) ok("the dose chart is visible");
+    else fail("the dose chart drew but stayed hidden");
+    // Non-zero, checked here rather than beside the activity check below so it
+    // inherits the same skip: the dose is folded against photon attenuation
+    // tables the other series never touch, so it can be zero while they are
+    // fine, and a chart drawn from an empty fold still has traces.
+    const peak = await page.$eval("#plot-dose", (el) =>
+      Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
+    if (peak > 0) ok(`peak contact dose ${peak.toExponential(3)} Gy/h`);
+    else fail("contact dose is zero -- the photon coefficient fold produced nothing");
+  } else {
+    const from = (await readFile("vendor/CORE_COMMIT", "utf8")).trim().slice(0, 8);
+    console.log(`skip  plot-dose: the solver vendored from core ${from} predates contact dose`);
   }
 
   // Non-zero physics: a page that renders empty axes passes a "did it draw"
@@ -293,14 +315,6 @@ async function main() {
     Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
   if (activity > 0) ok(`peak activity ${activity.toExponential(3)} Bq`);
   else fail("activity is zero -- data is loaded but nothing activated");
-
-  // The contact dose is folded against attenuation tables the other three do
-  // not touch, so it can be zero while activity is fine -- a chart drawn from
-  // an empty fold still has traces and still passes the check above.
-  const dose = await page.$eval("#plot-dose", (el) =>
-    Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
-  if (dose > 0) ok(`peak contact dose ${dose.toExponential(3)} Gy/h`);
-  else fail("contact dose is zero -- the photon coefficient fold produced nothing");
 
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });

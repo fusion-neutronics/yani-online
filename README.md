@@ -178,13 +178,23 @@ whose consequences cannot be read off the form. Every chart carries log/linear
 toggles for the axes a scale means something for.
 
 Results are activity, decay heat, contact dose rate, the final inventory and the
-decay photon lines. The contact dose is the odd one of the four series: it is
-intensive, so unlike the other three it does not scale with the volume on the
-form -- the semi-infinite slab estimate cancels the geometry, and a bigger lump
-of the same material reads the same at contact. It is absorbed dose in air with
-a build-up factor of 2.0, which is what `Material.contact_dose()` defaults to in
-the wheel, so the page and a Python run report the same number. Bremsstrahlung
-from decay electrons is not modelled, so a strong beta emitter reads low.
+decay photon lines. The contact dose is the odd one of the three time series: it
+is intensive, so unlike activity and decay heat it does not scale with the
+volume on the form -- the semi-infinite slab estimate cancels the geometry, and
+a bigger lump of the same material reads the same at contact. It opens on the
+total rather than a per-nuclide breakdown, with a checkbox for the breakdown,
+because the first question a dose answers is whether the thing can be handled
+and only the second is what is driving it. Absorbed dose in air at a build-up
+factor of 2.0, which is what `Material.contact_dose()` defaults to in the wheel,
+so the page and a Python run of the same setup report the same number:
+2.711e4 Gy/h against 2.710833e4 for the Fe56 check, Mn56 in both.
+Bremsstrahlung from decay electrons is not modelled, so a strong beta emitter
+reads low.
+
+The chart hides itself when `vendor/CORE_COMMIT` names a solver that predates
+the field, rather than drawing empty axes -- a dose plot with nothing in it
+reads as a material that gives no dose, which is a different and more alarming
+claim than "this build cannot tell you".
 
 A full run has been verified in Chromium, Firefox and WebKit from `file://`
 against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and
