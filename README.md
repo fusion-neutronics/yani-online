@@ -1,11 +1,9 @@
 # yani-online
 
-### [fusion-neutronics.github.io/yani-online](https://fusion-neutronics.github.io/yani-online/)
+### Online web app [fusion-neutronics.github.io/yani-online](https://fusion-neutronics.github.io/yani-online/)
 
-[YANI](https://github.com/fusion-neutronics/yani) in the browser. Build a
-material, build an irradiation and cooling schedule, run a real transmutation,
-and read back inventory, activity, decay heat, contact dose rate and decay
-photon lines.
+[YANI](https://github.com/fusion-neutronics/yani) **Y**et **A**nother **N**uclide **I**nventory in the browser.
+Build a material, build an irradiation and cooling schedule, run a real transmutation, and read back inventory, activity, decay heat, contact dose rate and decay photon lines.
 
 The solver is the same Rust that ships in the `yani` wheel, compiled to
 WebAssembly. Cross sections are continuous-energy -- nothing is collapsed to a
