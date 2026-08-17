@@ -278,10 +278,11 @@ export class YaniSession {
      * `schedule_json` is an array of `{"dt": seconds, "rate": n/cm^2/s,
      * "spectrum": index}`, where a step with no `spectrum` is decay-only.
      *
-     * Returns one entry per step: cumulative time, total activity and decay
-     * heat, both also broken down by nuclide, the atom densities, and the
-     * decay photon line spectrum. Everything the plots need, in one call, so
-     * the host does not pay a boundary crossing per series.
+     * Returns one entry per step: cumulative time, total activity, decay heat
+     * and contact dose rate, each also broken down by nuclide, the atom
+     * densities, and the decay photon line spectrum. Everything the plots
+     * need, in one call, so the host does not pay a boundary crossing per
+     * series.
      * @param {string} spectra_json
      * @param {string} schedule_json
      * @returns {string}

@@ -1,4 +1,4 @@
-// The four charts, drawn with plotly-basic.
+// The charts, drawn with plotly-basic.
 //
 // Palette and mark specs follow the data-viz method. The categorical hues were
 // run through its validator rather than chosen by eye:
@@ -118,6 +118,7 @@ const AXES = {
   "plot-spectrum": ["x", "y"],
   "plot-activity": ["x", "y"],
   "plot-heat": ["x", "y"],
+  "plot-dose": ["x", "y"],
   "plot-inventory": ["x"],
   "plot-photons": ["x", "y"],
 };
@@ -463,6 +464,15 @@ export function drawAll(results) {
     document.getElementById("plot-heat"),
     results, "decay_heat_by_nuclide",
     "Decay heat", "decay heat [W]",
+  );
+  // Alone among the four, this one does not scale with how much material there
+  // is: the semi-infinite slab estimate cancels the geometry, so the title says
+  // "at contact" rather than leaving a reader to assume it tracks the volume
+  // they typed in.
+  decaySeriesChart(
+    document.getElementById("plot-dose"),
+    results, "contact_dose_by_nuclide",
+    "Contact dose rate, at the surface", "absorbed dose in air [Gy/h]",
   );
   inventoryChart(document.getElementById("plot-inventory"), results);
 }

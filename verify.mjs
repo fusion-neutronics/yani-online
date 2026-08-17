@@ -166,6 +166,10 @@ async function main() {
     ["the spectrum", /yani\.sources\.Histogram\(/],
     ["the schedule", /yani\.PulseSchedule\(\[/],
     ["the run", /material\.transmute\(schedule=schedule\)/],
+    // At its defaults, which is the point: those defaults are what the page
+    // reports, so a script that passed its own would quietly disagree with the
+    // chart it is meant to reproduce.
+    ["the contact dose", /m\.contact_dose\(by_nuclide=True\)/],
     ["plotly", /^import plotly\.graph_objects as go$/m],
   ];
   const missing = wants.filter(([, pattern]) => !pattern.test(script)).map(([name]) => name);
@@ -277,7 +281,7 @@ async function main() {
   else fail(`second run made ${served + missed - before} requests; should make none`);
 
   // The charts have to have actually drawn, not merely been asked to.
-  for (const id of ["plot-activity", "plot-heat", "plot-inventory", "plot-photons"]) {
+  for (const id of ["plot-activity", "plot-heat", "plot-dose", "plot-inventory", "plot-photons"]) {
     const traces = await page.$eval(`#${id}`, (el) => el.data ? el.data.length : 0);
     if (traces > 0) ok(`${id} drew ${traces} traces`);
     else fail(`${id} drew nothing`);
@@ -289,6 +293,14 @@ async function main() {
     Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
   if (activity > 0) ok(`peak activity ${activity.toExponential(3)} Bq`);
   else fail("activity is zero -- data is loaded but nothing activated");
+
+  // The contact dose is folded against attenuation tables the other three do
+  // not touch, so it can be zero while activity is fine -- a chart drawn from
+  // an empty fold still has traces and still passes the check above.
+  const dose = await page.$eval("#plot-dose", (el) =>
+    Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
+  if (dose > 0) ok(`peak contact dose ${dose.toExponential(3)} Gy/h`);
+  else fail("contact dose is zero -- the photon coefficient fold produced nothing");
 
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });
