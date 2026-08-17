@@ -118,9 +118,25 @@ const AXES = {
   "plot-spectrum": ["x", "y"],
   "plot-activity": ["x", "y"],
   "plot-heat": ["x", "y"],
+  "plot-dose": ["x", "y"],
   "plot-inventory": ["x"],
   "plot-photons": ["x", "y"],
 };
+
+/// Charts that read either as one total or split by nuclide, and which they
+/// open on.
+///
+/// Only the dose has this. Activity and decay heat are read by nuclide by
+/// default because the question they answer is which product dominates and
+/// when. A contact dose is first a single number -- whether the thing can be
+/// handled, and after how long -- and only then a question of what is driving
+/// it, so it opens on the total and the breakdown is there when the first
+/// answer prompts the second.
+const BREAKDOWN = { "plot-dose": false };
+
+const breakdowns = new Map();
+const breakdownOf = (id) =>
+  breakdowns.has(id) ? breakdowns.get(id) : BREAKDOWN[id];
 
 /// Log everywhere by default, which is what these quantities are read on:
 /// activity over a decade of cooling, a spectrum across ten decades of energy.
@@ -140,10 +156,12 @@ const at = (type, v) => (type === "log" ? Math.log10(v) : v);
 const span = (type, floor, peak, headroom) =>
   type === "log" ? [Math.log10(floor), Math.log10(peak * headroom)] : [0, peak * 1.05];
 
-/// Put a scale toggle above each chart and call `onChange(id)` when one moves.
+/// Put the per-chart controls above each chart and call `onChange(id)` when one
+/// moves: a scale toggle per applicable axis, and a breakdown checkbox on the
+/// charts that have both readings.
 ///
 /// Built here rather than written into index.html because this file already
-/// owns which charts exist and which of their axes the control applies to.
+/// owns which charts exist and which controls apply to them.
 export function wireAxisScales(onChange) {
   for (const [id, axes] of Object.entries(AXES)) {
     const plot = document.getElementById(id);
@@ -166,6 +184,20 @@ export function wireAxisScales(onChange) {
         onChange(id);
       });
       label.append(name, select);
+      bar.append(label);
+    }
+    if (id in BREAKDOWN) {
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = breakdownOf(id);
+      const name = document.createElement("span");
+      name.textContent = "by nuclide";
+      check.addEventListener("change", () => {
+        breakdowns.set(id, check.checked);
+        onChange(id);
+      });
+      label.append(name, check);
       bar.append(label);
     }
     (plot.closest(".plot-wrap") || plot).before(bar);
@@ -202,14 +234,26 @@ function topSeries(perStep) {
 /// everything that matters. Six decades below the largest value is the floor.
 const DECADES = 6;
 
-function decaySeriesChart(el, results, key, title, yLabel) {
+/// One series carrying a per-step total, shaped like `topSeries` returns so the
+/// rest of the chart does not care which it was handed.
+function totalSeries(results, key, name) {
+  const values = results.map((r) => r[key] || 0);
+  return { series: [{ name, values }], peak: Math.max(...values) };
+}
+
+/// `total` names a per-step scalar and the label to draw it under. Given one,
+/// the chart obeys its breakdown checkbox; without one it is always by nuclide.
+function decaySeriesChart(el, results, key, title, yLabel, total = null) {
   const m = mode();
   const xType = scaleOf(el.id, "x");
   const yType = scaleOf(el.id, "y");
   const times = results.map((r) => r.time);
   const { scale, label } = timeAxis(times);
   const x = times.map((t) => t * scale);
-  const { series, peak } = topSeries(results.map((r) => r[key]));
+  const { series, peak } =
+    total && !breakdownOf(el.id)
+      ? totalSeries(results, total.key, total.name)
+      : topSeries(results.map((r) => r[key] || {}));
   if (peak <= 0) {
     Plotly.purge(el);
     return;
@@ -464,6 +508,29 @@ export function drawAll(results) {
     results, "decay_heat_by_nuclide",
     "Decay heat", "decay heat [W]",
   );
+  // Gy/h, absorbed dose in air, at a build-up factor of 2. A slab estimate
+  // rather than a transport result, so it carries no distance: it is the dose
+  // with a hand on the material, and a bigger piece of the same material reads
+  // the same.
+  //
+  // Hidden rather than drawn empty when the vendored solver predates the field
+  // (see vendor/CORE_COMMIT): an axis pair with nothing in it reads as a
+  // material that gives no dose, which is a different and alarming claim.
+  const dose = document.getElementById("plot-dose");
+  const wrap = dose.closest(".plot-wrap") || dose;
+  const bar = wrap.previousElementSibling;
+  if (results.some((r) => r.contact_dose !== undefined)) {
+    wrap.hidden = false;
+    if (bar && bar.classList.contains("axis-scale")) bar.hidden = false;
+    decaySeriesChart(
+      dose, results, "contact_dose_by_nuclide",
+      "Contact dose rate", "contact dose [Gy/h]",
+      { key: "contact_dose", name: "total" },
+    );
+  } else {
+    wrap.hidden = true;
+    if (bar && bar.classList.contains("axis-scale")) bar.hidden = true;
+  }
   inventoryChart(document.getElementById("plot-inventory"), results);
 }
 
