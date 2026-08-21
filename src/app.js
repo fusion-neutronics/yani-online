@@ -24,15 +24,20 @@ const ORIGIN = "https://yamc-data.xsplot.com";
 const LIBRARIES = {
   "endf-b8.1": { xs: true, decay: true, reactions: true, fission_yields: true, branching: true },
   "jeff-4.0": { xs: true, decay: true, reactions: true, fission_yields: true, branching: true },
+  "jendl-5.0": { xs: true, decay: true, reactions: true, fission_yields: true, branching: true },
   "tendl-2025": { xs: true, decay: false, reactions: true, fission_yields: false, branching: true },
   "tendl-2017": { xs: true, decay: false, reactions: true, fission_yields: false, branching: true },
   "fendl-3.2d": { xs: true, decay: false, reactions: false, fission_yields: false, branching: false },
 };
 
-// ENDF/B-8.1 by default for every subsection: it is the one library that
-// publishes a complete, self-consistent network. TENDL covers far more parent
-// nuclides for `reactions` and is the better choice when it is available, but
-// making it the default would silently require a second library for decay.
+// ENDF/B-8.1 by default for every subsection. Three libraries publish a
+// complete, self-consistent network (it, jeff-4.0 and jendl-5.0), and this one
+// is the default because it is what the rest of the stack defaults to, so a
+// calculation set up here matches one set up in yamc without being told to.
+//
+// TENDL covers far more parent nuclides for `reactions` and is the better
+// choice when it is available, but making it the default would silently require
+// a second library for decay.
 const DEFAULTS = {
   xs: "endf-b8.1",
   reactions: "endf-b8.1",
