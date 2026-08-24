@@ -49,6 +49,25 @@ const api = {
   groupStructure: (name) => JSON.parse(session.groupStructure(name)),
   requiredNuclides: () => JSON.parse(session.requiredNuclides()),
 
+  /// Which of the optional session methods this vendored solver carries.
+  ///
+  /// Feature-detected on the session rather than inferred from
+  /// vendor/CORE_COMMIT: a commit says which build this is, not what it can do,
+  /// and the page has to choose how to fetch before it has fetched anything.
+  ///
+  /// `requiredMts` is the probe the byte-range fetch needs. A solver that
+  /// answers it also reads a spliced Arrow stream, because neither of those is
+  /// any use without the other and they land together (core#527).
+  capabilities: () => ({
+    requiredMts: typeof session.requiredMts === "function",
+  }),
+
+  /// The MT numbers the loaded chain names, which is every reaction a run will
+  /// ask a cross section for. Comes from the solver so the page needs no second
+  /// copy of the chain-kind-to-MT table: an MT a copy of it missed would not
+  /// 404, it would be a reaction rate quietly collapsing to zero.
+  requiredMts: () => JSON.parse(session.requiredMts()),
+
   /// Seconds for each `{ value, unit }` step, from the solver's own table.
   ///
   /// One call for the whole schedule rather than one per step: it is a dozen

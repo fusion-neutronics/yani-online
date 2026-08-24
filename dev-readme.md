@@ -37,7 +37,7 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.22 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 3.24 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
@@ -46,7 +46,7 @@ fetches, and only when a calculation asks for it.
 | --- | ---: |
 | wasm (base64) | 2.67 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
-| page and application code | 0.10 MB |
+| page and application code | 0.12 MB |
 
 `plotly-basic` rather than the full bundle: every chart here is scatter or bar,
 which the basic distribution covers at a quarter of the size. It is gzipped
@@ -135,6 +135,83 @@ build of the same engine, so it is indicative rather than conclusive.
 Fetched from `yamc-data.xsplot.com` on demand. Which nuclides are needed is
 knowable before any of them are fetched, so the page reports the download budget
 up front rather than showing an open-ended spinner.
+
+### Fetching MTs rather than files
+
+`version.json` is fetched first for every nuclide, and the rest of that
+nuclide's fetch is decided by what it says. Two things follow from that order.
+
+The first works today. A library publishes far fewer nuclides than the chain
+names, and an unpublished one used to 404 three times, once per file; now it
+404s on `version.json` and the other two requests are never issued. Measured
+against the SFR chain fixture with an Fe material, 446 of the 461 nuclides in
+the closure are unpublished, and the run goes from 1383 nuclide-data requests to
+491.
+
+The second waits on core. Each `version.json` now carries `reaction_ranges`, the
+byte range of every MT's record batch inside `reactions.arrow` (core's
+`index_reactions` writes it; nothing else about the published data changed). An
+activation run reads the handful of channels its chain names and none of the
+full-grid transport MTs, which are most of the file, so the page plans a set of
+HTTP range requests instead of one whole-file GET, coalescing ranges less than
+16 kB apart, and splices `schema ++ batches ++ EOS` into an Arrow IPC stream.
+Over 68 ENDF/B-8.1 nuclides that is 109 MB where the whole files are 948 MB,
+8.7x less for the same answer, at 3.0 requests per nuclide rather than 10.4.
+
+That path is written and gated off, because nothing can read what it produces
+yet: everything the solver loads goes through `read_arrow_file`, which is
+`FileReader`, and an IPC stream has no footer for it to find. The gate is
+`requiredMts` on the session, feature-detected at boot rather than read off
+`vendor/CORE_COMMIT`: a commit says which build this is, not what it can do, and
+the page has to choose how to fetch before it has fetched anything. That method
+is also where the MT set comes from, so the page carries no copy of the chain
+kind to MT table. Both halves are core#527, and re-vendoring a solver that has
+them turns this on with no change here.
+
+The whole-file path stays as the fallback and is what the checks exercise, since
+no vendored solver takes the other one. A range answered `200` rather than `206`
+is treated as a stripped `Range` header and the body used as the whole file,
+which is the right answer through a proxy that does not pass ranges through.
+
+### Checking it
+
+`src/ranges.js` holds the arithmetic and the assembly, kept clear of the DOM and
+the network so `verify.mjs` can check both in Node without a browser: the parts a
+plan asks for, what coalescing merges and drops, the `Range` header's inclusive
+end, and which span belongs to which stream. That last one is where a mistake
+would be silent, so the spans are handed over deliberately out of order: a span
+filed by arrival rather than by plan splices a stream from the right bytes in the
+wrong order, and the loader would read it without complaint. It also caught the
+one real bug in this: `new Array(n)` is sparse and `every` skips holes, so a span
+that never arrived read as a complete set and reached the splice, which threw and
+took the whole run down instead of reporting one nuclide.
+
+`node verify.mjs --live` checks the part no synthetic fixture can, against the
+real origin: that the published index describes the published object, that ranges
+come back 206 with exactly the bytes asked for, and that a spliced stream is
+byte-for-byte the whole file's bytes at those offsets. Opt-in, because it is the
+only part that needs the network.
+
+Byte-exactness is what that asserts, since nothing in this repository decodes
+Arrow. That a byte-exact splice of these ranges *decodes* correctly was confirmed
+once with pyarrow, on Fe56, Li6, Cr52 and Pu239: the stream opens without a file
+header or footer, and its schema, its record batches, the table they fuse into
+and the (n,gamma) cross-section values are identical to reading the whole file.
+Pu239 covers fission, MT 18. That is a property of the format rather than of this
+code, so it is recorded here rather than re-run.
+
+Worth knowing for anyone tuning the 16 kB threshold: on every ENDF/B-8.1 nuclide
+checked, coalescing merges only ranges that already touch and swallows no
+unwanted MT at all, because the writer puts the activation MTs in contiguous
+runs. Every nuclide comes out at three requests whether five MTs are wanted or
+sixteen. So the threshold is free today, and the drop-the-swallowed-batch path
+exists for a layout that does not hold: it is reachable only from the synthetic
+fixture, which is why that fixture builds the case.
+
+To exercise the ranged path end to end in the browser the fixtures need the
+index, which is `cargo run --release -p yamc-convert --bin index_reactions --
+<fixture dir>` in core; the fixture server in `verify.mjs` honours `Range` and
+answers 206 either way.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default

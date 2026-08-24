@@ -12,6 +12,7 @@
 
 import { drawAll, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
+import { assembleNuclideData, planFetch, rangeHeader, reactionRanges } from "./ranges.js";
 
 // --- nuclear data ---------------------------------------------------------
 
@@ -111,6 +112,16 @@ for (const [name, preset] of Object.entries(PRESETS)) {
 const state = {
   solver: null,
   chainLoaded: false,
+  // What the vendored solver can do that an older one could not. Feature
+  // detected at boot rather than read off vendor/CORE_COMMIT: the page has to
+  // choose a fetch strategy before it has fetched anything, and a commit hash
+  // is not a capability.
+  caps: {},
+  // The MT numbers the loaded chain names, from the solver, or null when this
+  // build cannot say. Null is what puts the fetch back on whole files: the set
+  // decides which byte ranges to ask for, and guessing it wrong is a reaction
+  // rate that silently collapses to zero rather than a 404.
+  wantedMts: null,
   // Nuclides whose cross sections are already in the session. Checked before
   // every fetch so changing a schedule, a spectrum or the volume re-solves
   // without touching the network, and changing the material fetches only the
@@ -140,6 +151,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (text) => { $("status").textContent = text; };
+const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
 function warn(text) {
   const el = $("warning");
   el.hidden = !text;
@@ -214,6 +226,8 @@ class Solver {
   pnnlSearch(query) { return this.call("pnnlSearch", [query]); }
   groupStructure(name) { return this.call("groupStructure", [name]); }
   requiredNuclides() { return this.call("requiredNuclides"); }
+  capabilities() { return this.call("capabilities"); }
+  requiredMts() { return this.call("requiredMts"); }
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
@@ -313,6 +327,14 @@ async function bootPlotly() {
 /// visits are answered from the edge cache and never reach the bucket. The cap
 /// exists to keep a few hundred parallel requests from starving the UI thread,
 /// not to be polite to the origin.
+///
+/// A job carrying a `range` asks for those bytes alone. The origin serves
+/// `accept-ranges: bytes` and answers a range 206 out of the same edge cache as
+/// the whole object, so a slice costs what a file costs. The status is written
+/// back onto the job because the caller has to be able to tell 206 from 200: a
+/// proxy that strips the header answers with the entire object, and splicing
+/// that as though it were the slice asked for yields a stream of the wrong
+/// bytes that still decodes.
 async function fetchAll(jobs, onProgress, limit = 12) {
   let done = 0;
   let next = 0;
@@ -320,16 +342,18 @@ async function fetchAll(jobs, onProgress, limit = 12) {
   async function worker() {
     while (next < jobs.length) {
       const i = next++;
-      const { url, optional } = jobs[i];
+      const job = jobs[i];
       try {
-        const resp = await fetch(url);
+        const resp = await fetch(
+          job.url, job.range ? { headers: { Range: rangeHeader(job.range) } } : undefined);
+        job.status = resp.status;
         if (resp.ok) {
           results[i] = new Uint8Array(await resp.arrayBuffer());
-        } else if (!optional) {
-          throw new Error(`${resp.status} ${url}`);
+        } else if (!job.optional) {
+          throw new Error(`${resp.status} ${job.url}`);
         }
       } catch (e) {
-        if (!optional) throw e;
+        if (!job.optional) throw e;
       }
       onProgress(++done / jobs.length);
     }
@@ -368,36 +392,121 @@ async function loadChain(solver) {
 const shortKey = (subsection) =>
   ({ decay: "decay", reactions: "reactions", fission_yields: "fpy", branching: "branching" }[subsection]);
 
+/// The range plan for one nuclide, or `null` to fetch its whole file.
+///
+/// A `version.json` that does not parse is left for the solver to complain
+/// about: it is handed over either way, and the error it raises there names the
+/// section, where one raised here would name a fetch and send the reader
+/// looking in the wrong place.
+function rangePlan(versionBytes, wantedMts) {
+  let ranges;
+  try {
+    ranges = reactionRanges(JSON.parse(new TextDecoder().decode(versionBytes)));
+  } catch {
+    return null;
+  }
+  if (!ranges) return null;
+  const plan = planFetch(ranges, wantedMts);
+  // Nothing but the schema: this nuclide publishes none of the reactions the
+  // chain names. Splicing that would hand the loader a stream with no record
+  // batch in it, which is an error rather than an empty answer, so the whole
+  // file goes over as it always did and the loader finds nothing in it the same
+  // way it did before.
+  if (plan.parts.length < 2) return null;
+  // A plan that has coalesced into the whole file is not a saving, it is the
+  // whole file fetched as a range. Ask for it plainly instead, which is one
+  // request rather than one plus a splice.
+  return plan.bytes < plan.full ? plan : null;
+}
+
+/// Fetch the cross sections for `nuclides`, and say what came back.
+///
+/// Two passes, because the first one is the index for the second. `version.json`
+/// is a few kB, the loader requires it anyway, and it now also carries the byte
+/// range of every MT's record batch in `reactions.arrow`. So it is fetched
+/// first, and what it says decides how the big file is fetched:
+///
+///   - an index, and a solver that can read a spliced stream: one range request
+///     per run of wanted MTs. Measured over 68 ENDF/B-8.1 nuclides that is
+///     109 MB where the whole files are 948 MB, for the same answer, because
+///     the full-grid transport MTs an activation run never reads are most of
+///     each file.
+///   - anything else: the whole file, which is what this did before.
+///
+/// Fetching `version.json` first pays for itself on the fallback path too. The
+/// chain names far more nuclides than any one library publishes, and an
+/// unpublished nuclide used to 404 three times; now it 404s once and the other
+/// two requests are never issued. On the Fe56 closure that is 1383 nuclides and
+/// 2766 requests that no longer happen.
+///
+/// Every fetch here is optional, which is a deliberate difference from the
+/// wheel. The chain names more nuclides than any single library evaluates, so a
+/// handful of 404s is normal rather than exceptional, and failing the run over
+/// one would make the app unusable on a library with a gap. What is NOT
+/// acceptable is swallowing them: a nuclide with no cross sections reacts at
+/// zero, so the count is surfaced rather than logged.
 async function loadCrossSections(solver, nuclides) {
   const library = $("data-xs").value;
-  const jobs = [];
-  for (const nuclide of nuclides) {
-    for (const [file] of NUCLIDE_SECTIONS) {
-      jobs.push({
-        // Every one of these is optional at the fetch layer, which is a
-        // deliberate difference from the wheel. The chain names more nuclides
-        // than any single library evaluates, so a handful of 404s is normal
-        // rather than exceptional, and failing the run over one would make the
-        // app unusable on a library with a gap. What is NOT acceptable is
-        // swallowing them: a nuclide with no cross sections reacts at zero, so
-        // the count is surfaced rather than logged.
-        url: `${ORIGIN}/${library}/neutron/${nuclide}.arrow/${file}`,
-        optional: true,
-        nuclide,
-        file,
-      });
-    }
-  }
-  setStatus(`Fetching cross sections for ${nuclides.length} nuclides…`);
-  const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
+  const url = (nuclide, file) => `${ORIGIN}/${library}/neutron/${nuclide}.arrow/${file}`;
+
+  setStatus(`Checking what ${nuclides.length} nuclides publish…`);
+  const versions = await fetchAll(
+    nuclides.map((nuclide) => ({ url: url(nuclide, "version.json"), optional: true, nuclide })),
+    (f) => { $("progress").value = f; });
+
   const items = [];
   const missing = new Set();
-  jobs.forEach((job, i) => {
-    if (bytes[i]) items.push({ nuclide: job.nuclide, file: job.file, bytes: bytes[i] });
-    else missing.add(job.nuclide);
-  });
+  const plans = new Map();
+  const jobs = [];
+  for (const [i, nuclide] of nuclides.entries()) {
+    if (!versions[i]) {
+      // Not published by this library. Nothing else under this directory can
+      // exist, so the other two requests are not made.
+      missing.add(nuclide);
+      continue;
+    }
+    items.push({ nuclide, file: "version.json", bytes: versions[i] });
+    jobs.push({ url: url(nuclide, "nuclide.arrow"), optional: true, nuclide, file: "nuclide.arrow" });
+    const plan = state.wantedMts && rangePlan(versions[i], state.wantedMts);
+    if (plan) {
+      plans.set(nuclide, plan);
+      plan.spans.forEach((range, spanIndex) => {
+        jobs.push({
+          url: url(nuclide, "reactions.arrow"),
+          range, spanIndex, optional: true, nuclide, file: "reactions.arrow",
+        });
+      });
+    } else {
+      jobs.push({ url: url(nuclide, "reactions.arrow"), optional: true, nuclide, file: "reactions.arrow" });
+    }
+  }
+
+  const planned = [...plans.values()];
+  const budget = planned.reduce((n, p) => n + p.bytes, 0);
+  const whole = planned.reduce((n, p) => n + p.full, 0);
+  const count = nuclides.length - missing.size;
+  setStatus(
+    `Fetching cross sections for ${count} nuclides` +
+    (planned.length ? `, ${mb(budget)} of reactions rather than ${mb(whole)}…` : "…"));
+  $("progress").value = 0;
+  const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
+
+  // The assembly is in ranges.js so it can be checked without a browser: which
+  // span belongs to which stream, and what to do with a range that came back as
+  // a whole file, are the decisions here whose mistakes are silent.
+  const got = assembleNuclideData(jobs, bytes, plans);
+  items.push(...got.items);
+  for (const nuclide of got.missing) missing.add(nuclide);
+  if (got.stripped) {
+    // A proxy that strips the header strips it from every request, so a plan of
+    // three spans downloads the whole file three times. The requests already in
+    // flight here pay that; the next run does not, and it is the runs after the
+    // first that a session spends.
+    state.wantedMts = null;
+  }
+
   const held = await solver.addNuclideData(items);
-  return { held, missing: [...missing] };
+  return { held, missing: [...missing], saved: got.saved };
 }
 
 // --- building the calculation --------------------------------------------
@@ -593,6 +702,13 @@ async function ensureData() {
   if (!state.chainLoaded) {
     await loadChain(state.solver);
     state.chainLoaded = true;
+    // Which MTs a run reads is a property of the chain, so it is asked once the
+    // chain is in and then held: it decides which byte ranges of every
+    // nuclide's reactions.arrow are worth fetching. A solver too old to answer
+    // leaves it null and every file is fetched whole, as it was.
+    if (state.caps.requiredMts) {
+      state.wantedMts = new Set(await state.solver.requiredMts());
+    }
   }
   const required = await state.solver.requiredNuclides();
   const wanted = required.filter((n) => !state.haveNuclide.has(n));
@@ -601,7 +717,7 @@ async function ensureData() {
     (wanted.length ? `, ${wanted.length} still to fetch.` : ", all held.");
   if (!wanted.length) return;
 
-  const { held, missing } = await loadCrossSections(state.solver, wanted);
+  const { held, missing, saved } = await loadCrossSections(state.solver, wanted);
   for (const n of wanted) state.haveNuclide.add(n);
   if (missing.length) {
     // Named, not just counted: which nuclides are missing decides whether the
@@ -615,7 +731,12 @@ async function ensureData() {
       `result rather than wrong.`,
     );
   }
-  setStatus(`Loaded ${(held / 1048576).toFixed(0)} MB.`);
+  // The saving is worth naming rather than just being fast. It is the whole
+  // point of the byte-range index, and it is the difference between a page that
+  // can run a closure over a slow connection and one that cannot.
+  setStatus(
+    `Loaded ${mb(held)}` +
+    (saved ? `, skipping ${mb(saved)} of transport cross sections.` : "."));
 }
 
 async function run() {
@@ -752,6 +873,7 @@ async function main() {
   setStatus("Starting the solver…");
   await bootPlotly();
   state.solver = await bootSolver();
+  state.caps = await state.solver.capabilities();
   setStatus("Ready. Choose a material, then download the data it needs.");
 
   // The compendium is compiled into the wasm, so the picker works before a

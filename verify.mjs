@@ -6,7 +6,12 @@
 // test fixtures. Everything else -- the wasm boot, the chain parse, the
 // cross-section load, the solve, the plots -- is the real thing.
 //
-//   node verify.mjs [--headed]
+//   node verify.mjs [--headed] [--live [Nuclide ...]]
+//
+// `--live` adds a check against the real data origin: that the published MT
+// byte-range index describes the published object, that ranges are honoured,
+// and that a spliced stream is byte-for-byte the whole file's bytes. It is the
+// only part that needs the network.
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
@@ -14,6 +19,10 @@
 import { chromium } from "playwright";
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+
+import {
+  COALESCE_GAP, assembleNuclideData, planFetch, rangeHeader, reactionRanges, spliceStream,
+} from "./src/ranges.js";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
 // a sibling checkout, which is where they land after
@@ -38,10 +47,287 @@ function fixturePath(url) {
 const fail = (msg) => { console.error(`FAIL  ${msg}`); process.exitCode = 1; };
 const ok = (msg) => console.log(`ok    ${msg}`);
 
+const eq = (got, want, what) =>
+  (got === want ? ok(`${what}: ${got}`) : fail(`${what}: got ${got}, wanted ${want}`));
+
+const threw = (what, fn) => {
+  try {
+    fn();
+    fail(`${what}: no error raised`);
+  } catch {
+    ok(`${what}: refused`);
+  }
+};
+
+/// A stand-in reactions.arrow and the index over it.
+///
+/// 128 kB of pseudo-random bytes, so a cut in the wrong place cannot
+/// coincidentally match the right one. The MTs are laid out to put every case
+/// the fetch has to get right into one file:
+///
+///   MT 1     20 kB of transport total, wide enough to keep the schema out of
+///            the same request
+///   MT 16    wanted, and MT 102 wanted and touching it
+///   MT 2     1 kB of elastic between two wanted batches: close enough to be
+///            swallowed by the coalesce, and it must not reach the decoder
+///   MT 103   wanted, on the far side of it
+///   MT 301   100 kB of heating, which is most of the file and none of the run
+///
+/// Real published data exercises none of the swallowing: the writer puts the
+/// activation MTs in contiguous runs, so on every ENDF/B-8.1 nuclide checked the
+/// coalesce merges only ranges that already touch. That is why the case is built
+/// here rather than measured there.
+function synthetic() {
+  const file = new Uint8Array(131072);
+  let seed = 1;
+  for (let i = 0; i < file.length; i++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    file[i] = seed & 0xff;
+  }
+  return {
+    file,
+    version: {
+      reaction_ranges: {
+        schema: [64, 64],
+        mts: {
+          1: [128, 20000],
+          16: [20128, 128],
+          102: [20256, 256],
+          2: [20512, 1000],
+          103: [21512, 64],
+          301: [30000, 100000],
+        },
+      },
+    },
+  };
+}
+
+/// Check the byte-range arithmetic, without a browser and without fixtures.
+///
+/// This is the part of the cross-section fetch with sums in it, and the part
+/// whose failures are quiet: a range off by one splices a stream that still
+/// decodes, out of bytes that mean something else.
+function checkRanges() {
+  const { file, version } = synthetic();
+
+  eq(reactionRanges(null), null, "no version.json is no index");
+  eq(reactionRanges({}), null, "a version.json without the key is no index");
+
+  const ranges = reactionRanges(version);
+  const plan = planFetch(ranges, new Set([16, 102, 103]));
+  eq(plan.full, 130000, "the file is as long as its last batch ends");
+
+  // File order, not MT order, and the schema first whatever the sort would do.
+  eq(plan.parts.map((p) => p.off).join(","), "64,20128,20256,21512", "parts in file order");
+
+  // The schema is 20 kB clear of the first wanted batch, so it keeps its own
+  // request. The three wanted batches and the elastic between them are one run.
+  eq(plan.spans.length, 2, "four parts coalesce into two requests");
+  eq(plan.spans[1].off, 20128, "the second span starts at (n,2n)");
+  eq(plan.spans[1].len, 1448, "and runs to the end of (n,p), elastic included");
+  eq(plan.bytes, 1512, "the transfer is the two spans");
+  eq(plan.parts.reduce((n, p) => n + p.len, 0), 512, "of which 512 bytes are wanted");
+  eq(plan.bytes < plan.full / 80, true, "which is under a hundredth of the file");
+
+  // Elastic was fetched because it sat in the middle of a run. It has to be
+  // dropped on the way into the stream rather than handed to the decoder: a
+  // batch the loader was not asked for is a reaction it would fold into a rate.
+  const bodies = plan.spans.map((s) => file.subarray(s.off, s.off + s.len));
+  const stream = spliceStream(plan.parts, plan.spans, bodies);
+  eq(stream.length, 512 + 8, "the stream is the wanted parts plus the marker");
+
+  let at = 0;
+  let exact = true;
+  for (const part of plan.parts) {
+    for (let i = 0; i < part.len; i++) {
+      if (stream[at + i] !== file[part.off + i]) exact = false;
+    }
+    at += part.len;
+  }
+  eq(exact, true, "every spliced byte is the file's byte at that offset");
+  eq([...stream.slice(-8)].join(","), "255,255,255,255,0,0,0,0", "the stream ends in the EOS marker");
+
+  // A span that came back short would splice a stream whose framing still
+  // walks, out of the wrong bytes. It has to be refused rather than trusted.
+  threw("a short span", () => spliceStream(plan.parts, plan.spans, [bodies[0], bodies[1].subarray(0, 1400)]));
+  threw("a missing span", () => spliceStream(plan.parts, plan.spans, [bodies[0], undefined]));
+
+  // A nuclide publishing none of the wanted reactions plans nothing but a
+  // schema, and app.js reads that as "fetch the whole file" rather than sending
+  // the loader a stream with no batch in it, which is an error and not an empty
+  // answer.
+  eq(planFetch(ranges, new Set([200])).parts.length, 1, "no wanted MT is a schema-only plan");
+
+  // The header is inclusive at both ends, so a span of 64 bytes at offset 64
+  // ends at 127 and not 128. One past would splice from a body a byte longer
+  // than the span, one short would truncate every batch in the stream.
+  eq(rangeHeader({ off: 64, len: 64 }), "bytes=64-127", "the range header is inclusive at both ends");
+  eq(rangeHeader(plan.spans[1]), "bytes=20128-21575", "and covers the whole coalesced span");
+
+  // The threshold is a tuning constant rather than a correctness one, so it is
+  // stated rather than pinned. A zero would quietly turn every run of MTs back
+  // into one request each, which is the thing it exists to prevent.
+  eq(COALESCE_GAP > 0, true, "the coalesce threshold is set");
+}
+
+/// Check what gets handed to the solver, out of what came back.
+///
+/// The fetch answers in whatever order the network does, so this is where a
+/// silent error would live: a span filed by arrival rather than by plan splices
+/// a stream from the right bytes in the wrong order, and the loader reads that
+/// without complaint. Every case is built with the spans deliberately out of
+/// order for exactly that reason.
+function checkAssembly() {
+  const { file, version } = synthetic();
+  const plan = planFetch(reactionRanges(version), new Set([16, 102, 103]));
+  const plans = new Map([["Fe56", plan]]);
+  const body = (i) => file.slice(plan.spans[i].off, plan.spans[i].off + plan.spans[i].len);
+  const nuclideArrow = new Uint8Array([1, 2, 3]);
+
+  // The jobs as loadCrossSections builds them, but with span 1 ahead of span 0,
+  // which is what a slower first request looks like.
+  const jobs = [
+    { nuclide: "Fe56", file: "nuclide.arrow" },
+    { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[1], spanIndex: 1, status: 206 },
+    { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[0], spanIndex: 0, status: 206 },
+  ];
+
+  const got = assembleNuclideData(jobs, [nuclideArrow, body(1), body(0)], plans);
+  eq(got.items.length, 2, "both files are handed over");
+  eq(got.missing.size, 0, "nothing is missing");
+  eq(got.saved, plan.full - plan.bytes, "the saving is the file less the spans");
+  eq(got.stripped, false, "the ranges were honoured");
+
+  const reactions = got.items.find((it) => it.file === "reactions.arrow").bytes;
+  const wanted = spliceStream(plan.parts, plan.spans, [body(0), body(1)]);
+  eq(reactions.length, wanted.length, "the spliced stream is the expected length");
+  eq(reactions.every((b, i) => b === wanted[i]), true,
+     "spans out of order splice in plan order, not arrival order");
+
+  // A span that never arrived. The nuclide has to be reported rather than given
+  // a stream with a hole in it.
+  const short = assembleNuclideData(jobs, [nuclideArrow, body(1), undefined], plans);
+  eq(short.items.some((it) => it.file === "reactions.arrow"), false, "a lost span hands over no stream");
+  eq(short.missing.has("Fe56"), true, "and the nuclide is reported missing");
+  eq(short.saved, 0, "and nothing is counted as saved");
+
+  // A proxy that stripped the header: 200 with the whole object rather than 206
+  // with the slice. The body is the file, so it is used as the file.
+  const stripped = assembleNuclideData(
+    [jobs[0], { ...jobs[1], status: 200 }, { ...jobs[2], status: 200 }],
+    [nuclideArrow, file, file], plans);
+  eq(stripped.stripped, true, "a 200 answer to a range is noticed");
+  eq(stripped.items.find((it) => it.file === "reactions.arrow").bytes.length, file.length,
+     "and the whole object is handed over as the file");
+  eq(stripped.saved, 0, "with nothing claimed as saved");
+  eq(stripped.missing.size, 0, "and the nuclide is not reported missing");
+
+  // A nuclide with no plan at all, which is every nuclide today: both files pass
+  // straight through, and a 404 on either reports it.
+  const plainJobs = [
+    { nuclide: "Li6", file: "nuclide.arrow" },
+    { nuclide: "Li6", file: "reactions.arrow" },
+  ];
+  const plain = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow], new Map());
+  eq(plain.items.length, 2, "an unplanned nuclide hands over both files");
+  eq(plain.saved, 0, "and saves nothing");
+  const gap = assembleNuclideData(plainJobs, [nuclideArrow, undefined], new Map());
+  eq(gap.missing.has("Li6"), true, "a 404 on the whole-file path reports the nuclide");
+}
+
+/// Check the byte-range fetch against the real origin.
+///
+/// Opt-in, with `node verify.mjs --live [Nuclide ...]`, because it needs the
+/// network and downloads a whole reactions.arrow to compare against. What it
+/// proves is the part no synthetic fixture can: that the published index
+/// describes the published object, that the origin honours the ranges asked of
+/// it, and that a spliced stream is byte-for-byte the bytes the whole-file path
+/// would have read.
+///
+/// Byte-exactness is the claim rather than "it decodes", because there is
+/// nothing here that decodes Arrow. It was confirmed once with pyarrow that a
+/// byte-exact splice of these ranges opens as a stream and yields record
+/// batches, a fused table and (n,gamma) values identical to reading the whole
+/// file, on Fe56, Li6, Cr52 and Pu239. That is a property of the format, so it
+/// is recorded in dev-readme.md rather than re-run here.
+async function checkLive(names) {
+  const ORIGIN_LIVE = "https://yamc-data.xsplot.com";
+  const library = "endf-b8.1";
+  // The MTs a chain can name, which is the widest set the solver could ask for.
+  // Hard-coded here and nowhere in the page: this is a check, and what the page
+  // uses comes from the solver.
+  const wantedMts = new Set([
+    102, 18, 16, 17, 37, 152, 153, 160, 161, 103, 104, 105, 106, 107, 111, 108,
+    109, 22, 28, 32, 33, 112, 117, 155, 115, 116, 182, 34, 11, 29, 23, 24, 25,
+    30, 35, 36, 113, 114, 45, 158, 189, 41, 42, 44, 154, 193, 183, 184, 185,
+    191, 192, 186, 187, 188, 156, 162, 163, 164, 157, 169, 170, 171, 172, 173,
+    174, 175, 165, 166, 167, 168, 176, 177, 178, 179, 180, 181, 159, 190, 194,
+    195, 196, 197, 198, 199, 200,
+  ]);
+
+  for (const nuclide of names) {
+    const base = `${ORIGIN_LIVE}/${library}/neutron/${nuclide}.arrow`;
+    const version = await (await fetch(`${base}/version.json`)).json();
+    const ranges = reactionRanges(version);
+    if (!ranges) {
+      fail(`${nuclide}: version.json carries no reaction_ranges`);
+      continue;
+    }
+    const plan = planFetch(ranges, wantedMts);
+
+    const bodies = [];
+    let honoured = true;
+    for (const span of plan.spans) {
+      const resp = await fetch(`${base}/reactions.arrow`, { headers: { Range: rangeHeader(span) } });
+      if (resp.status !== 206) {
+        fail(`${nuclide}: ${rangeHeader(span)} answered ${resp.status}, not 206`);
+        honoured = false;
+        break;
+      }
+      const body = new Uint8Array(await resp.arrayBuffer());
+      if (body.length !== span.len) {
+        fail(`${nuclide}: asked for ${span.len} bytes, got ${body.length}`);
+        honoured = false;
+        break;
+      }
+      bodies.push(body);
+    }
+    if (!honoured) continue;
+    ok(`${nuclide}: ${plan.spans.length} ranges answered 206 exactly, ` +
+       `${(plan.bytes / 1048576).toFixed(2)} MB of ${(plan.full / 1048576).toFixed(2)} MB ` +
+       `(${(plan.full / plan.bytes).toFixed(1)}x less)`);
+
+    const stream = spliceStream(plan.parts, plan.spans, bodies);
+    const whole = new Uint8Array(await (await fetch(`${base}/reactions.arrow`)).arrayBuffer());
+
+    // Every part, in the order the stream carries them, against the same bytes
+    // of the object fetched whole.
+    let at = 0;
+    let exact = true;
+    for (const part of plan.parts) {
+      for (let i = 0; i < part.len; i++) {
+        if (stream[at + i] !== whole[part.off + i]) exact = false;
+      }
+      at += part.len;
+    }
+    if (exact) ok(`${nuclide}: the spliced stream is the whole file's bytes at those offsets`);
+    else fail(`${nuclide}: the spliced stream differs from the whole file`);
+    eq(at + 8, stream.length, `${nuclide}: the stream is its parts plus the marker`);
+  }
+}
+
 async function main() {
   if (!existsSync("dist/index.html")) {
     console.error("dist/index.html missing -- run `node build.mjs` first");
     process.exit(2);
+  }
+  // First, and without a browser or a byte of nuclear data: the range
+  // arithmetic the cross-section fetch is built on.
+  checkRanges();
+  checkAssembly();
+  if (process.argv.includes("--live")) {
+    const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+    await checkLive(named.length ? named : ["Li6", "Al27"]);
   }
   // A transmutation needs core's nuclear-data fixtures, which are gigabytes and
   // are not present in CI. Everything before the first run does not: whether the
@@ -93,17 +379,39 @@ async function main() {
     if (url.startsWith("file://") || url.startsWith("blob:") || url.startsWith(ORIGIN)) return;
     foreign.push(url);
   });
+  // Range requests are answered the way the origin answers them, 206 with the
+  // slice and a content-range. The page's cross-section fetch depends on that:
+  // with an MT byte-range index it asks for reactions.arrow in pieces, and a
+  // fixture server that ignored the header would hand back whole files, which
+  // the page correctly takes as "the range was stripped" and falls back on. The
+  // path under test would then never run while every check still passed.
+  let ranged = 0;
+  let rangedBytes = 0;
   await page.route(`${ORIGIN}/**`, async (route) => {
     const path = fixturePath(route.request().url());
-    if (path && existsSync(path)) {
-      served++;
-      await route.fulfill({ status: 200, body: await readFile(path) });
-    } else {
+    if (!path || !existsSync(path)) {
       // A 404 is the honest answer for a nuclide this fixture set does not
       // carry, and exercising it is the point: the page has to survive gaps.
       missed++;
       await route.fulfill({ status: 404, body: "" });
+      return;
     }
+    served++;
+    const body = await readFile(path);
+    const want = (route.request().headers().range || "").match(/^bytes=(\d+)-(\d+)$/);
+    if (!want) {
+      await route.fulfill({ status: 200, body });
+      return;
+    }
+    const start = Number(want[1]);
+    const end = Math.min(Number(want[2]), body.length - 1);
+    ranged++;
+    rangedBytes += end - start + 1;
+    await route.fulfill({
+      status: 206,
+      headers: { "content-range": `bytes ${start}-${end}/${body.length}` },
+      body: body.subarray(start, end + 1),
+    });
   });
 
   await page.goto(`file://${process.cwd()}/dist/index.html`);
@@ -248,6 +556,23 @@ async function main() {
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+
+  // Whether the run fetched MTs or whole files. Both are correct -- the whole
+  // file is the fallback and has to keep working -- so this reports rather than
+  // gates, and says which of the two preconditions is missing when it is the
+  // fallback that ran, because "no range requests" on its own reads as a bug.
+  if (ranged) {
+    ok(`fetched MT byte ranges: ${ranged} requests, ${(rangedBytes / 1048576).toFixed(1)} MB`);
+  } else {
+    const sample = `${FIXTURES}/Fe56.arrow/version.json`;
+    const indexed = existsSync(sample)
+      && "reaction_ranges" in JSON.parse(await readFile(sample, "utf8"));
+    const from = (await readFile("vendor/CORE_COMMIT", "utf8")).trim().slice(0, 8);
+    console.log(
+      `skip  MT byte ranges: ${indexed
+        ? `the solver vendored from core ${from} cannot say which MTs a chain needs (core#527)`
+        : "these fixtures carry no reaction_ranges -- run core's index_reactions over them"}`);
+  }
 
   const live = await page.evaluate(() => window.__liveness);
   if (!live.frames) {
