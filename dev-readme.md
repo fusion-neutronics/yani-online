@@ -37,14 +37,14 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.24 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 3.38 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 2.67 MB |
+| wasm (base64) | 2.81 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
 | page and application code | 0.12 MB |
 
@@ -55,18 +55,19 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces 2.52 MB where core's CI produces 2.00 MB.
+so a local `wasm-pack build` produces around 2.5 MB where core's CI produces
+2.11 MB.
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
 re-vendoring means downloading an asset rather than reproducing a toolchain:
 
 ```bash
-gh release download yani-core-0.5.0 -R fusion-neutronics/core \
+gh release download yani-core-0.11.0 -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 yani-core-0.5.0 > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 yani-core-0.11.0 > vendor/CORE_COMMIT`.
 
 ## Iterating without a build
 
@@ -148,30 +149,55 @@ against the SFR chain fixture with an Fe material, 446 of the 461 nuclides in
 the closure are unpublished, and the run goes from 1383 nuclide-data requests to
 491.
 
-The second waits on core. Each `version.json` now carries `reaction_ranges`, the
-byte range of every MT's record batch inside `reactions.arrow` (core's
-`index_reactions` writes it; nothing else about the published data changed). An
-activation run reads the handful of channels its chain names and none of the
-full-grid transport MTs, which are most of the file, so the page plans a set of
-HTTP range requests instead of one whole-file GET, coalescing ranges less than
-16 kB apart, and splices `schema ++ batches ++ EOS` into an Arrow IPC stream.
-Over 68 ENDF/B-8.1 nuclides that is 109 MB where the whole files are 948 MB,
-8.7x less for the same answer, at 3.0 requests per nuclide rather than 10.4.
+The second is live as of yani-core-0.11.0. Each `version.json` carries
+`reaction_ranges`, the byte range of every MT's record batch inside
+`reactions.arrow` (core's `index_reactions` writes it; nothing else about the
+published data changed, and all six libraries publish it as of the 2026-08-21
+data version). An activation run reads the handful of channels its chain names
+and none of the full-grid transport MTs, which are most of the file, so the page
+plans a set of HTTP range requests instead of one whole-file GET, coalescing
+ranges less than 16 kB apart, and splices `schema ++ batches ++ EOS` into an
+Arrow IPC stream.
 
-That path is written and gated off, because nothing can read what it produces
-yet: everything the solver loads goes through `read_arrow_file`, which is
-`FileReader`, and an IPC stream has no footer for it to find. The gate is
-`requiredMts` on the session, feature-detected at boot rather than read off
-`vendor/CORE_COMMIT`: a commit says which build this is, not what it can do, and
-the page has to choose how to fetch before it has fetched anything. That method
-is also where the MT set comes from, so the page carries no copy of the chain
-kind to MT table. Both halves are core#527, and re-vendoring a solver that has
-them turns this on with no change here.
+It was gated off until this release, because nothing could read what it produces:
+everything the solver loads goes through `read_arrow_file`, which was
+`FileReader`, and an IPC stream has no footer for it to find. It now sniffs the
+`ARROW1` magic and reads either framing. The gate is `requiredMts` on the
+session, feature-detected at boot rather than read off `vendor/CORE_COMMIT`: a
+commit says which build this is, not what it can do, and the page has to choose
+how to fetch before it has fetched anything. That method is also where the MT set
+comes from, so the page carries no copy of the chain kind to MT table. Both
+halves are core#527, and re-vendoring a solver that has them turned this on with
+no change here.
 
-The whole-file path stays as the fallback and is what the checks exercise, since
-no vendored solver takes the other one. A range answered `200` rather than `206`
-is treated as a stripped `Range` header and the body used as the whole file,
-which is the right answer through a proxy that does not pass ranges through.
+Measured end to end by `node verify.mjs`, on the SFR chain fixture with an Fe
+material: **13.6 MB across 47 requests where the whole files are 114.3 MB**, 8.4x
+less over 16 nuclides at 2.9 requests each, and the answer is identical --
+4.4380e14 Bq peak activity and 2.711e4 Gy/h peak contact dose, the same digits
+the whole-file path gives.
+
+A nuclide that publishes *none* of the wanted MTs plans nothing but the schema,
+and that plan is kept rather than dropped: the solver reads a
+schema-and-nothing-after-it stream as the empty subset it is, which is the same
+zero reactions the whole file would have given once the MT filter ran. He4 is the
+real case, in endf-b8.1 and jendl-5.0 alike. So the nuclides with nothing to give
+are the ones the index saves the most on -- all of the file rather than most of
+it.
+
+The fixture set carries no such nuclide, so that case was confirmed once against
+the vendored binary directly, driving `YaniSession` from Node with Fe56's
+published bytes: a 712-byte schema-only splice in place of the 31 MB file loads
+without error and transmutes to zero activity over zero nuclides, where the same
+splice taken over the MTs the chain does name is 3.81 MB and gives 5.51e14 Bq
+over three. Zero is the answer a nuclide with no activation channel should give;
+what mattered was that it is an answer rather than a thrown error taking the run
+with it.
+
+The whole-file path stays as the fallback, for a solver too old to say which MTs
+it needs and for a range answered `200` rather than `206`, which is treated as a
+stripped `Range` header and the body used as the whole file. That is the right
+answer through a proxy that does not pass ranges through, and once one request
+comes back that way the page stops asking for ranges for the rest of the session.
 
 ### Checking it
 
@@ -208,17 +234,29 @@ sixteen. So the threshold is free today, and the drop-the-swallowed-batch path
 exists for a layout that does not hold: it is reachable only from the synthetic
 fixture, which is why that fixture builds the case.
 
-To exercise the ranged path end to end in the browser the fixtures need the
-index, which is `cargo run --release -p yamc-convert --bin index_reactions --
-<fixture dir>` in core; the fixture server in `verify.mjs` honours `Range` and
-answers 206 either way.
+The fixtures carry the index themselves now -- core's
+`scripts/fetch_test_fixtures.py` downloads the published `version.json`, and the
+published one has `reaction_ranges` in it -- so the ranged path is what
+`verify.mjs` exercises end to end in the browser. For a fixture tree old enough
+to predate the index, `cargo run --release -p yamc-convert --bin index_reactions
+-- <fixture dir>` in core writes one. The fixture server in `verify.mjs` honours
+`Range` and answers 206 either way.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default
-throughout: it is the one library with a complete self-consistent network.
-TENDL covers far more parent nuclides for the reactions subsection and is
-usually the better choice there, but it publishes no decay data, so defaulting
-to it would silently require a second library.
+throughout: it is what the rest of the stack defaults to, so a calculation set up
+here matches one set up in the wheel without being told to. Three libraries
+publish a complete self-consistent network -- it, JEFF-4.0 and JENDL-5.0. TENDL
+covers far more parent nuclides for the reactions subsection and is usually the
+better choice there, but it publishes no decay data, so defaulting to it would
+silently require a second library.
+
+Picking a library for a subsection it does not publish is refused by the
+dropdowns rather than left to fail at fetch time. It is worth keeping that way:
+a subsection whose files 404 loads as an *empty* subsection, and since
+yani-core-0.11.0 a solve against one says so -- "the fission-yields subsection is
+not loaded, but 88 nuclides in this material have a non-zero fission rate" --
+where it used to drop those products silently.
 
 ## Status
 
@@ -248,13 +286,24 @@ the field, rather than drawing empty axes -- a dose plot with nothing in it
 reads as a material that gives no dose, which is a different and more alarming
 claim than "this build cannot tell you".
 
-A full run has been verified in Chromium, Firefox and WebKit from `file://`
-against real ENDF/B-VIII.1 data -- chain load, cross-section fetch, solve and
-all five result plots, with a Fe56 material and the 1383 unpublished nuclides of
-its closure answered as 404s. All three give 4.4380e14 Bq peak activity,
-identical to the last digit, and the same setup run through the `yani` Python
-package agrees with them to 2.1e-10 -- which is how the composition bug above
-was found. `node verify.mjs` is that check; it needs a local copy of the data
+The spectrum can be pasted against any of the ten neutron group structures the
+solver resolves by name, which is what it lists rather than a subset of them.
+The two photon structures it also knows are deliberately not offered: this is a
+neutron spectrum, and a photon grid pasted into it would resolve and solve and
+mean nothing. (`VITAMIN-J-42` was offered here until the release, and is one of
+the two.)
+
+A full run has been verified in Chromium from `file://` against real
+ENDF/B-VIII.1 data -- chain load, ranged cross-section fetch, solve and all five
+result plots, with a Fe56 material and the 446 unpublished nuclides of its
+closure answered as 404s: 4.4380e14 Bq peak activity, and 2.711e4 Gy/h peak
+contact dose. The same setup run through the `yani` Python package agrees to
+2.1e-10 -- which is how the composition bug above was found. Firefox and WebKit
+last ran the page end to end on the solver vendored before yani-core-0.11.0,
+where all three engines agreed to the last digit; only Chromium is installed
+here, so that is what this release was checked against.
+
+`node verify.mjs` is that check; it needs a local copy of the data
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
 one, so CI currently gates on everything up to the first solve.
 

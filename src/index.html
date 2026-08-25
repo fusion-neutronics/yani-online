@@ -312,10 +312,22 @@
       <div data-panel="groups" hidden>
         <label>
           <span>Boundaries</span>
+          <!-- The ten neutron structures the solver resolves by name, coarsest
+               first after the default. The two photon structures it also knows
+               (VITAMIN-J-42, CCFE-24-PHOTON) are deliberately absent: this is a
+               neutron spectrum, and a photon grid pasted into it would resolve
+               and solve and mean nothing. -->
           <select id="group-structure">
             <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV to 1 GeV)</option>
-            <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups)</option>
-            <option value="VITAMIN-J-42">VITAMIN-J-42 (42 groups)</option>
+            <option value="XMAS-172">XMAS-172 (172 groups, to 19.6 MeV)</option>
+            <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups, to 19.6 MeV)</option>
+            <option value="SCALE-252">SCALE-252 (252 groups, to 20 MeV)</option>
+            <option value="TRIPOLI-315">TRIPOLI-315 (315 groups, to 19.6 MeV)</option>
+            <option value="SHEM-361">SHEM-361 (361 groups, to 19.6 MeV)</option>
+            <option value="LLNL-616">LLNL-616 (616 groups, to 20 MeV)</option>
+            <option value="SCALE-999">SCALE-999 (999 groups, to 20 MeV)</option>
+            <option value="UKAEA-1102">UKAEA-1102 (1102 groups, to 1 GeV)</option>
+            <option value="ECCO-1968">ECCO-1968 (1968 groups, to 19.6 MeV)</option>
           </select>
         </label>
         <label>

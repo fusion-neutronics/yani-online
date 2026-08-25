@@ -153,9 +153,11 @@ function checkRanges() {
   threw("a missing span", () => spliceStream(plan.parts, plan.spans, [bodies[0], undefined]));
 
   // A nuclide publishing none of the wanted reactions plans nothing but a
-  // schema, and app.js reads that as "fetch the whole file" rather than sending
-  // the loader a stream with no batch in it, which is an error and not an empty
-  // answer.
+  // schema, and that plan is kept rather than dropped: the solver reads a
+  // schema-and-nothing-after-it stream as the empty subset it is, which is the
+  // same zero reactions the whole file would have given once the MT filter ran.
+  // He4 is the real case. So this is the plan that saves the most -- the whole
+  // file -- and reading it as "fetch everything" would have inverted that.
   eq(planFetch(ranges, new Set([200])).parts.length, 1, "no wanted MT is a schema-only plan");
 
   // The header is inclusive at both ends, so a span of 64 bytes at offset 64
@@ -387,6 +389,10 @@ async function main() {
   // path under test would then never run while every check still passed.
   let ranged = 0;
   let rangedBytes = 0;
+  // The whole size of each object a range was asked of, once per object. It is
+  // what the same run would have downloaded before the index existed, and
+  // without it the transfer below is a number with nothing to be small against.
+  const rangedFull = new Map();
   await page.route(`${ORIGIN}/**`, async (route) => {
     const path = fixturePath(route.request().url());
     if (!path || !existsSync(path)) {
@@ -407,6 +413,7 @@ async function main() {
     const end = Math.min(Number(want[2]), body.length - 1);
     ranged++;
     rangedBytes += end - start + 1;
+    rangedFull.set(path, body.length);
     await route.fulfill({
       status: 206,
       headers: { "content-range": `bytes ${start}-${end}/${body.length}` },
@@ -562,7 +569,11 @@ async function main() {
   // gates, and says which of the two preconditions is missing when it is the
   // fallback that ran, because "no range requests" on its own reads as a bug.
   if (ranged) {
-    ok(`fetched MT byte ranges: ${ranged} requests, ${(rangedBytes / 1048576).toFixed(1)} MB`);
+    const full = [...rangedFull.values()].reduce((n, v) => n + v, 0);
+    ok(
+      `fetched MT byte ranges: ${ranged} requests, ` +
+      `${(rangedBytes / 1048576).toFixed(1)} MB of ${(full / 1048576).toFixed(1)} MB ` +
+      `across ${rangedFull.size} objects`);
   } else {
     const sample = `${FIXTURES}/Fe56.arrow/version.json`;
     const indexed = existsSync(sample)

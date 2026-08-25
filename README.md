@@ -11,7 +11,10 @@ multigroup approximation to make it fit -- so a browser run and a `pip install
 yani` run give the same answer.
 
 Nothing is installed and nothing is uploaded: the page is one self-contained
-file that runs the solve locally, and nuclear data is the only thing it fetches.
+file that runs the solve locally, and nuclear data is the only thing it fetches
+-- and only the reaction channels the chain actually names, in byte ranges out
+of the published files rather than the files themselves, which is about eight
+times less to download for the same answer.
 
 ## The same solver, locally
 
