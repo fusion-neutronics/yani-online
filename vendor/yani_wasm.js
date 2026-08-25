@@ -107,10 +107,11 @@ export class YaniSession {
     /**
      * The energy boundaries of a named group structure, as a JSON array in eV.
      *
-     * `CCFE-709`, `VITAMIN-J-175`, `VITAMIN-J-42`, `CCFE-24-PHOTON`. Read back
-     * from here rather than duplicated in JS so a name means the same thing in
-     * the browser as in the wheel: a second copy of 710 boundaries is a second
-     * copy to drift.
+     * Any of the twelve names
+     * [`yamc_nuclide::group_structures::available_group_structures`] lists, ten
+     * neutron and two photon. Read back from here rather than duplicated in JS
+     * so a name means the same thing in the browser as in the wheel: a second
+     * copy of 710 boundaries is a second copy to drift.
      *
      * The tables are compiled in, so this needs no data.
      * @param {string} name
@@ -236,6 +237,41 @@ export class YaniSession {
             deferred2_0 = ret[0];
             deferred2_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * The MT numbers the loaded chain names, as a sorted JSON array.
+     *
+     * Every reaction a run will ask a cross section for, and nothing else. The
+     * host uses it to fetch only those MTs out of each `reactions.arrow`,
+     * through the byte ranges `version.json` publishes: the full-grid transport
+     * MTs an activation run never reads are most of every file.
+     *
+     * Answered here rather than computed in JS so the page needs no second copy
+     * of the chain-kind-to-MT table. An MT a copy of it missed would not 404,
+     * it would be a reaction rate quietly collapsing to zero.
+     *
+     * A chain-wide union rather than a set per nuclide, which is what
+     * `transmute` itself scopes the load to. It costs no extra bytes: an MT the
+     * union adds for one nuclide simply has no batch in another's file.
+     * @returns {string}
+     */
+    requiredMts() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.yanisession_requiredMts(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
         } finally {
             wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }

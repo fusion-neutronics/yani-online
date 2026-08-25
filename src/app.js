@@ -48,7 +48,10 @@ const DEFAULTS = {
 };
 
 // The section files each chain subsection publishes, and whether a 404 is
-// fatal. Mirrors `transmutation_sections` in url_cache.rs.
+// fatal. Mirrors `transmutation_sections` in url_cache.rs, less the
+// `provenance.json` each subsection now also carries: the solver takes it and
+// does nothing with it, so fetching it would be one request per subsection
+// spent on bytes nothing reads.
 const CHAIN_SECTIONS = {
   decay: [["nuclides.arrow", true], ["decay_modes.arrow", false], ["sources.arrow", false]],
   reactions: [["reactions.arrow", true]],
@@ -407,12 +410,14 @@ function rangePlan(versionBytes, wantedMts) {
   }
   if (!ranges) return null;
   const plan = planFetch(ranges, wantedMts);
-  // Nothing but the schema: this nuclide publishes none of the reactions the
-  // chain names. Splicing that would hand the loader a stream with no record
-  // batch in it, which is an error rather than an empty answer, so the whole
-  // file goes over as it always did and the loader finds nothing in it the same
-  // way it did before.
-  if (plan.parts.length < 2) return null;
+  // A plan of nothing but the schema is kept, not discarded. This nuclide
+  // publishes none of the reactions the chain names -- He4 is the real case,
+  // carrying elastic and the transport lookups and no activation channel at
+  // all -- and the solver reads a schema-and-nothing-after-it stream as the
+  // empty subset it is, which is the same zero reactions the whole file would
+  // have produced once the MT filter ran. So the saving here is the whole file
+  // rather than most of it, on exactly the nuclides that had nothing to give.
+  //
   // A plan that has coalesced into the whole file is not a saving, it is the
   // whole file fetched as a range. Ask for it plainly instead, which is one
   // request rather than one plus a splice.
