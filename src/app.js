@@ -120,6 +120,10 @@ const state = {
   // choose a fetch strategy before it has fetched anything, and a commit hash
   // is not a capability.
   caps: {},
+  // The material currently in the session, as the arguments that built it.
+  // Compared before rebuilding: a fresh Material is an empty one, and throwing
+  // the old one away throws away the cross sections decoded into it.
+  materialKey: null,
   // The MT numbers the loaded chain names, from the solver, or null when this
   // build cannot say. Null is what puts the fetch back on whole files: the set
   // decides which byte ranges to ask for, and guessing it wrong is a reaction
@@ -520,26 +524,64 @@ function activeTab(panel) {
   return panel.querySelector('[role="tab"][aria-selected="true"]').dataset.tab;
 }
 
-function applyMaterial(solver) {
+/// The arguments that would build the material the form describes.
+///
+/// Split out from applying it so the two can be compared: what decides whether
+/// a rebuild is needed is exactly what the builders are passed.
+function materialSpec() {
   const volume = Number($("volume").value);
   const materialPanel = document.querySelector(".panel");
   if (activeTab(materialPanel) === "pnnl") {
     const name = $("pnnl-select").value;
     if (!name) throw new Error("choose a material");
-    return solver.pnnlMaterial(name, volume);
+    return { kind: "pnnl", args: [name, volume] };
   }
   const composition = {};
   for (const { name, fraction } of state.composition) {
     if (name.trim()) composition[name.trim()] = fraction;
   }
   if (!Object.keys(composition).length) throw new Error("the composition is empty");
-  return solver.buildMaterial(
-    JSON.stringify(composition),
-    Number($("density").value),
-    $("density-units").value,
-    $("fraction-type").value,
-    volume,
-  );
+  return {
+    kind: "custom",
+    args: [
+      JSON.stringify(composition),
+      Number($("density").value),
+      $("density-units").value,
+      $("fraction-type").value,
+      volume,
+    ],
+  };
+}
+
+/// Put the material the form describes into the session, if it is not there.
+///
+/// The skip is the point, not an optimisation of the call itself. The solver
+/// decodes each nuclide's cross sections into the material it was handed and
+/// keeps them there, and the global cache behind that holds only weak
+/// references (core#588), so a rebuilt material is an empty one and the next
+/// solve re-decodes every reachable nuclide. Rebuilding on every run, which is
+/// what this did, threw that away every time.
+///
+/// It is the page's own interaction loop that this buys: changing a schedule, a
+/// spectrum or a step and running again touches nothing about the material, and
+/// that is most of what anyone does here after the first run.
+///
+/// The key is the builder arguments themselves, so anything that changes the
+/// material -- composition, density, units, fraction type, volume -- rebuilds,
+/// and the decoded data goes with the material it belonged to. Set after the
+/// call, so a build that failed is not recorded as applied.
+async function applyMaterial(solver) {
+  const spec = materialSpec();
+  const key = JSON.stringify(spec);
+  if (key === state.materialKey) return;
+  // Cleared first: a failed build leaves the session holding whichever material
+  // it had before, and calling that one applied would run the next solve
+  // against a material the form no longer describes.
+  state.materialKey = null;
+  await (spec.kind === "pnnl"
+    ? solver.pnnlMaterial(...spec.args)
+    : solver.buildMaterial(...spec.args));
+  state.materialKey = key;
 }
 
 async function currentSpectrum() {

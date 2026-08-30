@@ -258,6 +258,71 @@ yani-core-0.11.0 a solve against one says so -- "the fission-yields subsection i
 not loaded, but 88 nuclides in this material have a non-zero fission rate" --
 where it used to drop those products silently.
 
+## Speed
+
+Two numbers, and they are different questions. The first solve carries the
+fetch, the chain parse and the Arrow decode of every reachable nuclide. The
+solves after it change nothing about the material, which is what anyone actually
+does here: move a pulse, add a cooldown, run again. `node bench-solve.mjs
+<label>` measures both against the fixtures.
+
+The material is rebuilt only when something about it changed. That reads like a
+micro-optimisation and is not: the solver decodes each nuclide's cross sections
+into the material it was handed and keeps them there, and the cache behind that
+holds only weak references (fusion-neutronics/core#588), so a rebuilt material
+is an empty one and the next solve re-decodes the lot. Rebuilding on every run,
+which is what this did, threw that away every time.
+
+Measured by `node bench-solve.mjs`, three runs of each of the four
+combinations, against the same fixtures:
+
+| solver | material | repeat solve | first solve |
+| --- | --- | --- | --- |
+| 0.11.0 | rebuilt every run | 95, 93, 95 ms | 572, 555, 607 ms |
+| 0.11.0 | reused | 92, 95, 93 ms | 577, 574, 583 ms |
+| 0.12.0 | rebuilt every run | 79, 83, 80 ms | 568, 603, 590 ms |
+| 0.12.0 | reused | 62, 64, 61 ms | 533, 564, 583 ms |
+
+Three runs rather than one because the interesting claim is a negative: the two
+0.11.0 rows overlap completely, which is the reuse being worth *nothing* there,
+and a single pair of numbers cannot tell that from noise. The 0.12.0 rows do not
+overlap at all.
+
+So the reuse is worth nothing on 0.11.0, which is the point: 0.11.0 has no data
+to keep on the material. On 0.12.0 it is worth about 80 ms to about 62 ms, and
+the pair together take a repeat solve from about 95 ms to about 62 ms.
+
+The first solve does not move, because it is dominated by the fetch rather than
+by anything either change touches.
+
+These are smaller than they would have been before the fixtures carried
+`reaction_ranges`. The byte-range fetch means only the activation MTs are
+fetched and decoded, 13.6 MB against 114.3 MB, so there is far less decode left
+for keeping the material to save. The first solve fell from about 1.3 s to about
+0.6 s when the fixtures gained the index, which is the byte-range work rather
+than anything here.
+
+The fixtures still understate the reuse. They carry 16 indexed nuclides where a
+real closure is 461 at roughly 508 MB of activation-scoped Arrow, and core
+measured the decode at 1.8 s of a 2.3 s call on a ~430-nuclide steel. The bigger
+the closure, the more of a repeat solve is decode, and the more this removes.
+
+Two things that do *not* arrive with a newer solver, and are worth knowing
+before reading core's benchmark table as a promise:
+
+- **The parallel findings do not apply.** rayon is a target-gated dependency in
+  `yani-transmute` and every parallel site has a sequential wasm arm, because
+  the browser has one thread. Findings 5a, 5b, 5c and 4, which are most of
+  core's headline 10.5x and 38x, are simply the sequential code here.
+- **The GIL finding is Python's.** So the wasm-applicable rows are the
+  sequential ones, and they are worth about 2x.
+
+Reusing a material has one hazard, which is a cache key that misses a field:
+the page would solve a changed material against the one before it and report
+the old answer as the new one, with nothing to see. `verify.mjs` changes the
+volume, the density and the composition and requires the answer to follow each
+one, and to come back exactly on the way back.
+
 ## Status
 
 Working: the page builds, boots from `file://` with no console errors, and the
