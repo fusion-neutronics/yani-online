@@ -652,6 +652,69 @@ async function main() {
   if (activity > 0) ok(`peak activity ${activity.toExponential(3)} Bq`);
   else fail("activity is zero -- data is loaded but nothing activated");
 
+  // The material is only rebuilt when something about it changed, because a
+  // rebuilt Material is an empty one and the solver keeps its decoded cross
+  // sections in the one it was handed. The hazard that opens is a cache key
+  // that misses a field: the page would then solve a changed material against
+  // the one before it and report the old answer as the new one, with nothing
+  // to see. So each input is changed and the answer has to follow it.
+  //
+  // Volume and density are the probes because they move the answer without
+  // moving which nuclides are needed, so none of this refetches. Both are
+  // linear in the inventory, which is what makes the expected value exact
+  // rather than merely different.
+  await page.evaluate(() => {
+    window.__done = 0;
+    const el = document.getElementById("status");
+    new MutationObserver(() => {
+      if (el.textContent.startsWith("Done")) window.__done++;
+    }).observe(el, { childList: true, characterData: true, subtree: true });
+  });
+  const solve = async () => {
+    const before = await page.evaluate(() => window.__done);
+    await page.click("#run");
+    await page.waitForFunction((b) => window.__done > b, before, { timeout: 300000 });
+    // The status reaches "Done" inside the same task that asks Plotly to draw,
+    // so the traces on the element can still be the previous run's. Settle
+    // before reading, or every value here is one run behind.
+    await page.waitForTimeout(400);
+    return page.$eval("#plot-activity", (el) =>
+      Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
+  };
+  const close = (got, want) => Math.abs(got - want) <= Math.abs(want) * 1e-9;
+
+  const volume = await page.$eval("#volume", (el) => el.value);
+  const base = await solve();
+
+  await page.fill("#volume", String(Number(volume) * 2));
+  const doubled = await solve();
+  if (close(doubled, base * 2)) ok("doubling the volume doubles the activity");
+  else fail(`volume is missing from the material key: ${doubled.toExponential(4)} against ${(base * 2).toExponential(4)}`);
+
+  await page.fill("#volume", volume);
+  const restored = await solve();
+  if (restored === base) ok("restoring the volume restores the answer exactly");
+  else fail(`volume round trip drifted: ${restored.toExponential(6)} against ${base.toExponential(6)}`);
+
+  const density = await page.$eval("#density", (el) => el.value);
+  await page.fill("#density", String(Number(density) * 2));
+  const denser = await solve();
+  if (close(denser, base * 2)) ok("doubling the density doubles the activity");
+  else fail(`density is missing from the material key: ${denser.toExponential(4)} against ${(base * 2).toExponential(4)}`);
+  await page.fill("#density", density);
+
+  // The composition itself, on a nuclide the fixtures carry, so this does not
+  // fetch either. Fe57 activates differently from Fe56; equal answers would
+  // mean the second run was solved against the first one's material.
+  await page.fill('#composition input[data-k="name"]', "Fe57");
+  const fe57 = await solve();
+  if (fe57 !== base && fe57 > 0) ok(`changing the nuclide changes the answer (Fe57 ${fe57.toExponential(3)} Bq)`);
+  else fail(`composition is missing from the material key: Fe57 gave ${fe57.toExponential(6)}`);
+  await page.fill('#composition input[data-k="name"]', "Fe56");
+  const back = await solve();
+  if (back === base) ok("and changing it back restores the original exactly");
+  else fail(`composition round trip drifted: ${back.toExponential(6)} against ${base.toExponential(6)}`);
+
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.click("#run");
