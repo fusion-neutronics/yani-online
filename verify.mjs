@@ -21,7 +21,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 import {
-  COALESCE_GAP, assembleNuclideData, planFetch, rangeHeader, reactionRanges, spliceStream,
+  COALESCE_GAP, assembleNuclideData, planFetch, rangeHeader, reactionRanges, spliceStream, wantedParts,
 } from "./src/ranges.js";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
@@ -67,11 +67,16 @@ const threw = (what, fn) => {
 ///
 ///   MT 1     20 kB of transport total, wide enough to keep the schema out of
 ///            the same request
-///   MT 16    wanted, and MT 102 wanted and touching it
+///   MT 16    wanted, at two temperatures that are two batches back to back,
+///            and MT 102 wanted and touching them
 ///   MT 2     1 kB of elastic between two wanted batches: close enough to be
 ///            swallowed by the coalesce, and it must not reach the decoder
 ///   MT 103   wanted, on the far side of it
 ///   MT 301   100 kB of heating, which is most of the file and none of the run
+///
+/// The index is keyed by MT and then by temperature, one batch per pair, the
+/// shape core writes since fusion-neutronics/core#100. Every other MT here has
+/// the one temperature.
 ///
 /// Real published data exercises none of the swallowing: the writer puts the
 /// activation MTs in contiguous runs, so on every ENDF/B-8.1 nuclide checked the
@@ -90,12 +95,12 @@ function synthetic() {
       reaction_ranges: {
         schema: [64, 64],
         mts: {
-          1: [128, 20000],
-          16: [20128, 128],
-          102: [20256, 256],
-          2: [20512, 1000],
-          103: [21512, 64],
-          301: [30000, 100000],
+          1: { "294K": [128, 20000] },
+          16: { "294K": [20128, 64], "600K": [20192, 64] },
+          102: { "294K": [20256, 256] },
+          2: { "294K": [20512, 1000] },
+          103: { "294K": [21512, 64] },
+          301: { "294K": [30000, 100000] },
         },
       },
     },
@@ -112,22 +117,38 @@ function checkRanges() {
 
   eq(reactionRanges(null), null, "no version.json is no index");
   eq(reactionRanges({}), null, "a version.json without the key is no index");
+  eq(reactionRanges({ reaction_ranges: { schema: [64, 64], mts: { 16: [20128, 128] } } }), null,
+     "an index from before the temperature split is no index");
 
   const ranges = reactionRanges(version);
+  eq([...ranges.mts.get(16).keys()].join(","), "294K,600K", "the temperatures of an MT are read");
   const plan = planFetch(ranges, new Set([16, 102, 103]));
   eq(plan.full, 130000, "the file is as long as its last batch ends");
 
   // File order, not MT order, and the schema first whatever the sort would do.
-  eq(plan.parts.map((p) => p.off).join(","), "64,20128,20256,21512", "parts in file order");
+  // Both temperatures of (n,2n) are wanted, since no temperature was named.
+  eq(plan.parts.map((p) => p.off).join(","), "64,20128,20192,20256,21512", "parts in file order");
 
   // The schema is 20 kB clear of the first wanted batch, so it keeps its own
-  // request. The three wanted batches and the elastic between them are one run.
-  eq(plan.spans.length, 2, "four parts coalesce into two requests");
+  // request. The four wanted batches and the elastic between them are one run.
+  eq(plan.spans.length, 2, "five parts coalesce into two requests");
   eq(plan.spans[1].off, 20128, "the second span starts at (n,2n)");
   eq(plan.spans[1].len, 1448, "and runs to the end of (n,p), elastic included");
   eq(plan.bytes, 1512, "the transfer is the two spans");
   eq(plan.parts.reduce((n, p) => n + p.len, 0), 512, "of which 512 bytes are wanted");
   eq(plan.bytes < plan.full / 80, true, "which is under a hundredth of the file");
+
+  // One temperature of one MT is one batch: the plotter's request, and the
+  // reason the index carries the temperature axis at all.
+  const one = planFetch(ranges, new Set([16]), COALESCE_GAP, new Set(["600K"]));
+  eq(one.parts.map((p) => p.off).join(","), "64,20192", "one temperature of (n,2n) is its own batch");
+  eq(one.parts.reduce((n, p) => n + p.len, 0), 128, "the schema and that batch");
+
+  // A file written one batch per MT lists the same batch under each of its
+  // temperatures; asking for both must fetch it once.
+  const shared = reactionRanges({ reaction_ranges: { schema: [64, 64],
+    mts: { 16: { "294K": [128, 100], "600K": [128, 100] } } } });
+  eq(wantedParts(shared, new Set([16])).length, 2, "a batch shared by two temperatures is one part");
 
   // Elastic was fetched because it sat in the middle of a run. It has to be
   // dropped on the way into the stream rather than handed to the decoder: a
@@ -272,7 +293,10 @@ async function checkLive(names) {
     const version = await (await fetch(`${base}/version.json`)).json();
     const ranges = reactionRanges(version);
     if (!ranges) {
-      fail(`${nuclide}: version.json carries no reaction_ranges`);
+      fail(`${nuclide}: version.json carries no reaction_ranges this build can plan from`
+        + (version.reaction_ranges
+          ? " (it has one in the shape from before fusion-neutronics/core#100; reindex it)"
+          : ""));
       continue;
     }
     const plan = planFetch(ranges, wantedMts);
@@ -576,13 +600,20 @@ async function main() {
       `across ${rangedFull.size} objects`);
   } else {
     const sample = `${FIXTURES}/Fe56.arrow/version.json`;
-    const indexed = existsSync(sample)
-      && "reaction_ranges" in JSON.parse(await readFile(sample, "utf8"));
+    const version = existsSync(sample) ? JSON.parse(await readFile(sample, "utf8")) : {};
+    // Planned from, not merely present: a fixture carrying the one-level index
+    // from before fusion-neutronics/core#100 has the key and is still no index
+    // to this build, and blaming the solver for that reads as the wrong bug.
+    const indexed = reactionRanges(version) !== null;
+    const stale = !indexed && Boolean(version.reaction_ranges);
     const from = (await readFile("vendor/CORE_COMMIT", "utf8")).trim().slice(0, 8);
     console.log(
       `skip  MT byte ranges: ${indexed
         ? `the solver vendored from core ${from} cannot say which MTs a chain needs (core#527)`
-        : "these fixtures carry no reaction_ranges -- run core's index_reactions over them"}`);
+        : stale
+          ? "these fixtures carry the reaction_ranges shape from before "
+            + "fusion-neutronics/core#100 -- run core's index_reactions over them"
+          : "these fixtures carry no reaction_ranges -- run core's index_reactions over them"}`);
   }
 
   const live = await page.evaluate(() => window.__liveness);

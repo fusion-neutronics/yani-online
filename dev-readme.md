@@ -150,10 +150,14 @@ the closure are unpublished, and the run goes from 1383 nuclide-data requests to
 491.
 
 The second is live as of yani-core-0.11.0. Each `version.json` carries
-`reaction_ranges`, the byte range of every MT's record batch inside
-`reactions.arrow` (core's `index_reactions` writes it; nothing else about the
-published data changed, and all six libraries publish it as of the 2026-08-21
-data version). An activation run reads the handful of channels its chain names
+`reaction_ranges`, the byte range of every record batch inside
+`reactions.arrow`, keyed by MT and then by temperature (core's
+`index_reactions` writes it; since fusion-neutronics/core#100 the file is
+written one batch per (MT, temperature), so one temperature of one reaction is
+its own range). That two-level shape is what this build plans from, and the
+published data still carries the one-level shape it replaces, so until every
+`version.json` on the origin has been reindexed the page reads them as no index
+and falls back to whole-file GETs. An activation run reads the handful of channels its chain names
 and none of the full-grid transport MTs, which are most of the file, so the page
 plans a set of HTTP range requests instead of one whole-file GET, coalescing
 ranges less than 16 kB apart, and splices `schema ++ batches ++ EOS` into an
@@ -234,13 +238,16 @@ sixteen. So the threshold is free today, and the drop-the-swallowed-batch path
 exists for a layout that does not hold: it is reachable only from the synthetic
 fixture, which is why that fixture builds the case.
 
-The fixtures carry the index themselves now -- core's
+The fixtures carry an index themselves -- core's
 `scripts/fetch_test_fixtures.py` downloads the published `version.json`, and the
-published one has `reaction_ranges` in it -- so the ranged path is what
-`verify.mjs` exercises end to end in the browser. For a fixture tree old enough
-to predate the index, `cargo run --release -p yamc-convert --bin index_reactions
--- <fixture dir>` in core writes one. The fixture server in `verify.mjs` honours
-`Range` and answers 206 either way.
+published one has `reaction_ranges` in it -- but until the origin is reindexed
+that is the one-level shape from before fusion-neutronics/core#100, which this
+build reads as no index. So does a tree old enough to predate the index. Either
+way `cargo run --release -p yamc-convert --bin index_reactions -- <fixture dir>`
+in a core at or after that change rewrites the fixtures' `version.json` in the
+two-level shape, and the browser run then exercises the ranged path end to end;
+without it `verify.mjs` prints the skip line and the page fetches whole objects.
+The fixture server in `verify.mjs` honours `Range` and answers 206 either way.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default

@@ -432,8 +432,8 @@ function rangePlan(versionBytes, wantedMts) {
 ///
 /// Two passes, because the first one is the index for the second. `version.json`
 /// is a few kB, the loader requires it anyway, and it now also carries the byte
-/// range of every MT's record batch in `reactions.arrow`. So it is fetched
-/// first, and what it says decides how the big file is fetched:
+/// range of every (MT, temperature) record batch in `reactions.arrow`. So it is
+/// fetched first, and what it says decides how the big file is fetched:
 ///
 ///   - an index, and a solver that can read a spliced stream: one range request
 ///     per run of wanted MTs. Measured over 68 ENDF/B-8.1 nuclides that is

@@ -1,13 +1,15 @@
 // Fetching only the MTs a run reads, out of a `reactions.arrow` that holds
 // every MT.
 //
-// The published file is written one Arrow record batch per MT, so every MT is
-// already a contiguous byte range in the object, and each nuclide's
-// `version.json` now names those ranges (`reaction_ranges`, added by core's
-// `index_reactions`). An activation run reads the handful of channels its chain
-// names and none of the full-grid transport MTs, which are most of the file:
-// measured over 68 ENDF/B-8.1 nuclides, the MTs `REACTION_MT_MAP` can name are
-// 109 MB of 948 MB, so this is 8.7x less to download for the same answer.
+// The published file is written one Arrow record batch per (MT, temperature),
+// so every cross section is already a contiguous byte range in the object, and
+// each nuclide's `version.json` names those ranges (`reaction_ranges`, added by
+// core's `index_reactions`, keyed by MT and then by temperature). An activation
+// run reads the handful of channels its chain names and none of the full-grid
+// transport MTs, which are most of the file: measured over 68 ENDF/B-8.1
+// nuclides, the MTs `REACTION_MT_MAP` can name are 109 MB of 948 MB, so this is
+// 8.7x less to download for the same answer. A plotter can go further and read
+// one channel at the one temperature it draws.
 //
 // The index rides in a file the page already fetches, so reading it costs no
 // extra request. What it buys is spent as HTTP range requests, which the origin
@@ -35,22 +37,43 @@ export const COALESCE_GAP = 16 * 1024;
 
 /// Read the byte-range index out of a nuclide's parsed `version.json`.
 ///
+/// `mts` maps each MT to a map of temperature label (`"294K"`, as the file
+/// spells it) to the range of the record batch carrying that cross section
+/// (fusion-neutronics/core#100). A file written one batch per MT lists the same
+/// range under each temperature the batch carries.
+///
 /// `null` when there is no index, which is what a library converted before core
-/// grew one looks like. Callers fall back to fetching the whole file, so this
-/// is a normal answer rather than an error.
+/// grew one looks like, and also what an index in the shape from before the
+/// temperature split looks like (`mt -> [off, len]`): core's reader treats that
+/// the same way, and the published `version.json` is reindexed rather than read
+/// two ways. Callers fall back to fetching the whole file, so this is a normal
+/// answer rather than an error.
 export function reactionRanges(version) {
   const index = version && version.reaction_ranges;
   if (!index || !Array.isArray(index.schema) || !index.mts) return null;
   const mts = new Map();
-  for (const [mt, range] of Object.entries(index.mts)) {
-    if (Array.isArray(range)) mts.set(Number(mt), { off: range[0], len: range[1] });
+  for (const [mt, byTemperature] of Object.entries(index.mts)) {
+    // One entry in the shape from before the split makes the whole index
+    // unusable rather than one MT unfetchable: reading it as a half-index would
+    // leave that MT looking unpublished, and a stream missing a channel reacts
+    // at zero without saying so. Core's `ReactionRanges::from_json` refuses the
+    // same input, and both fall back to fetching the whole file.
+    if (!byTemperature || typeof byTemperature !== "object" || Array.isArray(byTemperature)) return null;
+    const temperatures = new Map();
+    for (const [temperature, range] of Object.entries(byTemperature)) {
+      if (!Array.isArray(range)) return null;
+      temperatures.set(temperature, { off: range[0], len: range[1] });
+    }
+    if (temperatures.size) mts.set(Number(mt), temperatures);
   }
   if (!mts.size) return null;
   return { schema: { off: index.schema[0], len: index.schema[1] }, mts };
 }
 
 /// The messages a run needs: the schema, then the record batch of every wanted
-/// MT this nuclide actually publishes.
+/// MT this nuclide actually publishes, at every temperature, or at the
+/// temperatures `wantedTemperatures` names when it is given (the plotter draws
+/// one).
 ///
 /// In file order rather than MT order, and MT order is not file order. A
 /// decoder does not care -- record batch messages are self-contained -- but the
@@ -59,13 +82,22 @@ export function reactionRanges(version) {
 /// identical to what reading the whole file produces, which is one fewer way
 /// for the two paths to disagree.
 ///
-/// An MT the chain names that this nuclide does not publish is simply absent:
-/// the nuclide does not have that channel, which is not the same as a fetch
-/// having failed.
-export function wantedParts(ranges, wantedMts) {
+/// A batch listed under several temperatures is wanted once however many of
+/// them are asked for. An MT the chain names that this nuclide does not publish
+/// is simply absent: the nuclide does not have that channel, which is not the
+/// same as a fetch having failed.
+export function wantedParts(ranges, wantedMts, wantedTemperatures = null) {
   const batches = [];
-  for (const [mt, range] of ranges.mts) {
-    if (wantedMts.has(mt)) batches.push(range);
+  const seen = new Set();
+  for (const [mt, byTemperature] of ranges.mts) {
+    if (!wantedMts.has(mt)) continue;
+    for (const [temperature, range] of byTemperature) {
+      if (wantedTemperatures && !wantedTemperatures.has(temperature)) continue;
+      const key = `${range.off}+${range.len}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      batches.push(range);
+    }
   }
   batches.sort((a, b) => a.off - b.off);
   // The schema is the first message in the file, before every batch, so it
@@ -98,11 +130,13 @@ export function coalesce(parts, gap = COALESCE_GAP) {
 /// the sum of the parts. `full` is the whole file for comparison, taken as the
 /// end of the last batch: the index describes every message in the object, so
 /// the only thing past its end is the Arrow footer.
-export function planFetch(ranges, wantedMts, gap = COALESCE_GAP) {
-  const parts = wantedParts(ranges, wantedMts);
+export function planFetch(ranges, wantedMts, gap = COALESCE_GAP, wantedTemperatures = null) {
+  const parts = wantedParts(ranges, wantedMts, wantedTemperatures);
   const spans = coalesce(parts, gap);
   let full = 0;
-  for (const { off, len } of ranges.mts.values()) full = Math.max(full, off + len);
+  for (const byTemperature of ranges.mts.values()) {
+    for (const { off, len } of byTemperature.values()) full = Math.max(full, off + len);
+  }
   return {
     parts,
     spans,
