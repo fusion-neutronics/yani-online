@@ -206,17 +206,19 @@ function checkAssembly() {
   const plans = new Map([["Fe56", plan]]);
   const body = (i) => file.slice(plan.spans[i].off, plan.spans[i].off + plan.spans[i].len);
   const nuclideArrow = new Uint8Array([1, 2, 3]);
+  const energyArrow = new Uint8Array([4, 5, 6]);
 
   // The jobs as loadCrossSections builds them, but with span 1 ahead of span 0,
   // which is what a slower first request looks like.
   const jobs = [
     { nuclide: "Fe56", file: "nuclide.arrow" },
+    { nuclide: "Fe56", file: "energy.arrow" },
     { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[1], spanIndex: 1, status: 206 },
     { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[0], spanIndex: 0, status: 206 },
   ];
 
-  const got = assembleNuclideData(jobs, [nuclideArrow, body(1), body(0)], plans);
-  eq(got.items.length, 2, "both files are handed over");
+  const got = assembleNuclideData(jobs, [nuclideArrow, energyArrow, body(1), body(0)], plans);
+  eq(got.items.length, 3, "all three files are handed over");
   eq(got.missing.size, 0, "nothing is missing");
   eq(got.saved, plan.full - plan.bytes, "the saving is the file less the spans");
   eq(got.stripped, false, "the ranges were honoured");
@@ -229,7 +231,7 @@ function checkAssembly() {
 
   // A span that never arrived. The nuclide has to be reported rather than given
   // a stream with a hole in it.
-  const short = assembleNuclideData(jobs, [nuclideArrow, body(1), undefined], plans);
+  const short = assembleNuclideData(jobs, [nuclideArrow, energyArrow, body(1), undefined], plans);
   eq(short.items.some((it) => it.file === "reactions.arrow"), false, "a lost span hands over no stream");
   eq(short.missing.has("Fe56"), true, "and the nuclide is reported missing");
   eq(short.saved, 0, "and nothing is counted as saved");
@@ -237,8 +239,8 @@ function checkAssembly() {
   // A proxy that stripped the header: 200 with the whole object rather than 206
   // with the slice. The body is the file, so it is used as the file.
   const stripped = assembleNuclideData(
-    [jobs[0], { ...jobs[1], status: 200 }, { ...jobs[2], status: 200 }],
-    [nuclideArrow, file, file], plans);
+    [jobs[0], jobs[1], { ...jobs[2], status: 200 }, { ...jobs[3], status: 200 }],
+    [nuclideArrow, energyArrow, file, file], plans);
   eq(stripped.stripped, true, "a 200 answer to a range is noticed");
   eq(stripped.items.find((it) => it.file === "reactions.arrow").bytes.length, file.length,
      "and the whole object is handed over as the file");
@@ -249,12 +251,18 @@ function checkAssembly() {
   // straight through, and a 404 on either reports it.
   const plainJobs = [
     { nuclide: "Li6", file: "nuclide.arrow" },
+    { nuclide: "Li6", file: "energy.arrow" },
     { nuclide: "Li6", file: "reactions.arrow" },
   ];
-  const plain = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow], new Map());
-  eq(plain.items.length, 2, "an unplanned nuclide hands over both files");
+  const plain = assembleNuclideData(plainJobs, [nuclideArrow, energyArrow, nuclideArrow], new Map());
+  eq(plain.items.length, 3, "an unplanned nuclide hands over every file");
   eq(plain.saved, 0, "and saves nothing");
-  const gap = assembleNuclideData(plainJobs, [nuclideArrow, undefined], new Map());
+  // A 404 on the grids reports the nuclide too: core refuses a load with no
+  // energy.arrow, so handing over the other two would fail later and less
+  // clearly.
+  const noGrid = assembleNuclideData(plainJobs, [nuclideArrow, undefined, nuclideArrow], new Map());
+  eq(noGrid.missing.has("Li6"), true, "a 404 on energy.arrow reports the nuclide");
+  const gap = assembleNuclideData(plainJobs, [nuclideArrow, energyArrow, undefined], new Map());
   eq(gap.missing.has("Li6"), true, "a 404 on the whole-file path reports the nuclide");
 }
 

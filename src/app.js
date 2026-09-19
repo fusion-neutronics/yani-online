@@ -64,11 +64,6 @@ const CHAIN_SECTIONS = {
   branching: [["branching.arrow", false]],
 };
 
-// What an activation run reads from a nuclide: the union energy grid and the
-// cross sections, and nothing else. The transport sections are 4/5 of the data
-// and are never touched here.
-const NUCLIDE_SECTIONS = [["version.json", true], ["nuclide.arrow", true], ["reactions.arrow", true]];
-
 // --- spectra --------------------------------------------------------------
 
 // Coarse shapes, deliberately. These are starting points for someone without a
@@ -470,12 +465,24 @@ async function loadCrossSections(solver, nuclides) {
   for (const [i, nuclide] of nuclides.entries()) {
     if (!versions[i]) {
       // Not published by this library. Nothing else under this directory can
-      // exist, so the other two requests are not made.
+      // exist, so the rest of that nuclide's requests are not made.
       missing.add(nuclide);
       continue;
     }
     items.push({ nuclide, file: "version.json", bytes: versions[i] });
     jobs.push({ url: url(nuclide, "nuclide.arrow"), optional: true, nuclide, file: "nuclide.arrow" });
+    // The union energy grids, their own object since fusion-neutronics/core#100
+    // moved them out of nuclide.arrow. Every cross section is interpolated
+    // against them, so a nuclide without this one cannot activate: core refuses
+    // the load outright rather than answering with no grid. Fetched whole, not
+    // ranged -- this page has no temperature to narrow to, since an activation
+    // run folds the cross sections at whatever temperatures the library
+    // publishes.
+    //
+    // Optional in the same sense the two below are: a 404 puts the nuclide in
+    // `missing` and the count is surfaced, which beats failing the whole run
+    // over one nuclide the library does not carry.
+    jobs.push({ url: url(nuclide, "energy.arrow"), optional: true, nuclide, file: "energy.arrow" });
     const plan = state.wantedMts && rangePlan(versions[i], state.wantedMts);
     if (plan) {
       plans.set(nuclide, plan);
