@@ -171,11 +171,17 @@ results = material.transmute(schedule=schedule)
 steps = results.step_materials(material.id or 0)
 
 SECONDS = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0, "a": 365.25 * 86400.0}
+# Time after shutdown, in years, to match the page's axis: a decay curve is
+# read from the end of the last pulse, and on a log axis the irradiation ahead
+# of it would push every cooling point up against one value. Steps at or before
+# shutdown come out at zero or negative and plotly leaves them off a log axis.
+ends = []
 elapsed = 0.0
-times = []
 for _kind, _rate, (value, unit) in SCHEDULE:
     elapsed += value * SECONDS[unit]
-    times.append(elapsed / SECONDS["a"])  # years, to match the page's axis
+    ends.append(elapsed)
+shutdown = max((end for (kind, _rate, _d), end in zip(SCHEDULE, ends) if kind == "pulse"), default=0.0)
+times = [(end - shutdown) / SECONDS["a"] for end in ends]
 
 activity = [m.activity(by_nuclide=True) for m in steps]
 heat = [m.decay_heat(by_nuclide=True) for m in steps]
@@ -213,7 +219,7 @@ def series_figure(per_step, title, y_label):
             mode="lines+markers",
             name=name,
         )
-    figure.update_layout(title=title, xaxis_title="time [years]", yaxis_title=y_label)
+    figure.update_layout(title=title, xaxis_title="time after shutdown [years]", yaxis_title=y_label)
     # Log on both: activity spans decades over a cooling curve, and time is
     # sampled log-spaced for the same reason.
     figure.update_xaxes(type="log")

@@ -88,6 +88,34 @@ const CHAIN_SECTIONS = {
 
 // --- state ----------------------------------------------------------------
 
+/// Seconds per unit, the spellings the schedule table offers and the solver's
+/// `durationToSeconds` reads. Here for choosing a unit to *show* a duration
+/// in; the conversion the run uses stays the solver's.
+const UNIT_SECONDS = { s: 1, min: 60, h: 3600, d: 86400, a: 365.25 * 86400 };
+
+/// Cooling steps whose cumulative times run log-evenly from `start` to `stop`
+/// seconds in `n` steps, as `{ kind, value, unit }` rows of the schedule.
+///
+/// The same arithmetic as `yani.cooldown_steps((1, "s"), (10, "a"), 10)` in
+/// the wheel: the cumulative times are the geometric sequence, and each step's
+/// duration is the gap to the one before. Each duration is then shown in the
+/// largest unit it fills, to three significant figures, so the table reads as
+/// "7.8 s", "1.47 h", "8.86 a" rather than as seconds with nine digits. The
+/// rounding moves a cumulative time by under a percent, which is nothing on a
+/// log axis and is what makes the row a number someone could have typed.
+function logSpacedCooldowns(start, stop, n) {
+  const steps = [];
+  let previous = 0;
+  for (let k = 0; k < n; k++) {
+    const cumulative = start * (stop / start) ** (k / (n - 1));
+    const seconds = cumulative - previous;
+    previous = cumulative;
+    const unit = Object.keys(UNIT_SECONDS).reverse().find((u) => seconds >= UNIT_SECONDS[u]) || "s";
+    steps.push({ kind: "cooldown", value: Number((seconds / UNIT_SECONDS[unit]).toPrecision(3)), unit });
+  }
+  return steps;
+}
+
 const state = {
   solver: null,
   chainLoaded: false,
@@ -117,26 +145,22 @@ const state = {
   // temperature.
   dataKey: null,
   results: null,
-  // A year of irradiation, then cooling sampled log-spaced from an hour to ten
-  // years. A single cooldown step is a defensible default and a useless plot:
-  // two points a day apart on a log axis show nothing, and the whole shape of
-  // an activation problem is which nuclide dominates at which decade. Each
-  // cooldown's duration is the length of *that step*, so these are the gaps
-  // between the cumulative times, not the times themselves.
+  // A year of irradiation, then ten cooling steps at cumulative times spaced
+  // log-evenly from a second to ten years. A single cooldown step is a
+  // defensible default and a useless plot: two points a day apart on a log
+  // axis show nothing, and the whole shape of an activation problem is which
+  // nuclide dominates at which decade. Log-spaced because decay is
+  // exponential and the charts are log-log, so evenly spaced plotted points
+  // means log-spaced times. Each cooldown's duration is the length of *that
+  // step*, so these are the gaps between the cumulative times, not the times
+  // themselves, which is what `logSpacedCooldowns` differences for us.
   schedule: [
     { kind: "pulse", rate: 1e14, value: 1, unit: "a" },
-    { kind: "cooldown", value: 1, unit: "h" },
-    { kind: "cooldown", value: 5, unit: "h" },
-    { kind: "cooldown", value: 18, unit: "h" },
-    { kind: "cooldown", value: 3, unit: "d" },
-    { kind: "cooldown", value: 10, unit: "d" },
-    { kind: "cooldown", value: 46, unit: "d" },
-    { kind: "cooldown", value: 305, unit: "d" },
-    { kind: "cooldown", value: 3, unit: "a" },
-    { kind: "cooldown", value: 6, unit: "a" },
+    ...logSpacedCooldowns(1, 10 * 365.25 * 86400, 10),
   ],
   composition: [{ name: "Fe", fraction: 1.0 }],
 };
+
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (text) => { $("status").textContent = text; };
