@@ -447,21 +447,59 @@ function decaySeriesChart(el, results, key, title, yLabel, total) {
   }), CONFIG);
 }
 
-/// The inventory at the final step, as a magnitude comparison.
+/// How many nuclides the inventory names. Fifteen bars is what the chart's
+/// height reads comfortably; the rest of a closure is trace.
+const INVENTORY_SHOWN = 15;
+
+/// The x range showing the inventory at every step, in the axis's own
+/// coordinates: from the smallest density any step's fifteen reach down to,
+/// to the largest any step has, with a tenth of the extent to spare each side.
+/// `null` when no step has a nuclide.
+///
+/// Fixed across the steps for the same reason the photon axes are: the slider
+/// walks the steps, and an axis that followed each step's own fifteen would
+/// slide under the reader as the trace products decay away and the floor of
+/// the chart moved with them. Held still, a bar's length means the same thing
+/// at every step, which is what makes two steps comparable at a glance.
+function inventoryRange(results, xType) {
+  let lo = Infinity;
+  let hi = 0;
+  for (const step of results) {
+    const shown = Object.values(step.atoms_per_barn_cm || {})
+      .filter((v) => v > 0)
+      .sort((a, b) => b - a)
+      .slice(0, INVENTORY_SHOWN);
+    if (!shown.length) continue;
+    hi = Math.max(hi, shown[0]);
+    lo = Math.min(lo, shown[shown.length - 1]);
+  }
+  if (!(hi > 0)) return null;
+  const a = at(xType, lo);
+  const b = at(xType, hi);
+  const pad = (b - a) / 10 || 0.5;
+  return [xType === "log" ? a - pad : Math.max(0, a - pad), b + pad];
+}
+
+/// The inventory at one step, as a magnitude comparison.
 ///
 /// A bar chart, not a line: this answers "how much of what is left", which is
 /// one instant and a ranking, not a trend. One hue, because the bars are one
 /// measure -- colouring each nuclide differently would encode identity twice
-/// and imply a categorical relationship the ranking already carries.
-function inventoryChart(el, results) {
+/// and imply a categorical relationship the ranking already carries. The step
+/// is the slider's, as for the photon lines, and the x axis is the whole run's,
+/// see `inventoryRange`; `uirevision` keeps a zoom across the slider.
+export function drawInventory(results, stepIndex) {
+  const el = document.getElementById("plot-inventory");
   const m = mode();
-  const final = results[results.length - 1].atoms_per_barn_cm || {};
-  const ranked = Object.entries(final)
+  const xType = scaleOf(el.id, "x");
+  const xRange = inventoryRange(results, xType);
+  const step = results[stepIndex] || {};
+  const ranked = Object.entries(step.atoms_per_barn_cm || {})
     .filter(([, v]) => v > 0)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
+    .slice(0, INVENTORY_SHOWN)
     .reverse();
-  if (!ranked.length) {
+  if (xRange === null) {
     Plotly.purge(el);
     return;
   }
@@ -473,11 +511,11 @@ function inventoryChart(el, results) {
     marker: { color: SERIES[m][0] },
     hovertemplate: "%{y}: %{x:.3e} atom/barn-cm<extra></extra>",
   }], baseLayout(
-    "Inventory at the final step",
+    `Inventory at step ${stepIndex + 1}`,
     "atom density [atom/barn-cm]",
     "",
     {
-      xaxis: { type: scaleOf(el.id, "x") },
+      xaxis: { type: xType, range: xRange, uirevision: photonRevision(results, xType) },
       yaxis: { automargin: true, gridcolor: "rgba(0,0,0,0)" },
       layout: { showlegend: false, margin: { l: 80, r: 24, t: 40, b: 48 } },
     },
@@ -734,7 +772,6 @@ export function drawAll(results) {
     wrap.hidden = true;
     if (bar && bar.classList.contains("axis-scale")) bar.hidden = true;
   }
-  inventoryChart(document.getElementById("plot-inventory"), results);
 }
 
 // Re-draw on a theme change: the dark steps are a selected palette validated

@@ -10,7 +10,7 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { drawAll, drawInventory, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, planNuclide, rangeHeader } from "./ranges.js";
 import { SPECTRA } from "./spectra.js";
@@ -939,11 +939,16 @@ async function run() {
     }
     $("results-empty").hidden = true;
     $("results").hidden = false;
-    const slider = $("photon-step");
-    slider.max = String(state.results.length - 1);
-    slider.value = String(state.results.length - 1);
-    $("photon-step-label").value = state.results.length;
+    // The two stepped charts open on the last step, which is the answer most
+    // runs are after: what is left, and what it emits, at the end.
+    for (const id of ["photon-step", "inventory-step"]) {
+      const slider = $(id);
+      slider.max = String(state.results.length - 1);
+      slider.value = String(state.results.length - 1);
+      $(`${id}-label`).value = state.results.length;
+    }
     drawAll(state.results);
+    drawInventory(state.results, state.results.length - 1);
     drawPhotons(state.results, state.results.length - 1);
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
@@ -1175,6 +1180,7 @@ async function main() {
       refreshSpectrum();
     } else if (state.results) {
       if (id === "plot-photons") drawPhotons(state.results, Number($("photon-step").value));
+      else if (id === "plot-inventory") drawInventory(state.results, Number($("inventory-step").value));
       else drawAll(state.results);
     }
   });
@@ -1186,10 +1192,20 @@ async function main() {
     refreshSpectrum();
     if (state.results) {
       drawAll(state.results);
+      drawInventory(state.results, Number($("inventory-step").value));
       drawPhotons(state.results, Number($("photon-step").value));
     }
   });
 
+  // The stepped charts each have a slider of their own: the inventory and the
+  // photon lines are looked at for different reasons, and a reader comparing
+  // the inventory at two steps should not have the photon plot jumping about
+  // under it.
+  $("inventory-step").addEventListener("input", (e) => {
+    const i = Number(e.target.value);
+    $("inventory-step-label").value = i + 1;
+    if (state.results) drawInventory(state.results, i);
+  });
   $("photon-step").addEventListener("input", (e) => {
     const i = Number(e.target.value);
     $("photon-step-label").value = i + 1;

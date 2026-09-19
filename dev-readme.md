@@ -456,8 +456,8 @@ is plotted from the moment the page loads -- it is an input, and the only one
 whose consequences cannot be read off the form. Every chart carries log/linear
 toggles for the axes a scale means something for.
 
-Results are activity, decay heat, contact dose rate, the final inventory and the
-decay photon lines. The three time series are plotted against time *after
+Results are activity, decay heat, contact dose rate, the inventory at each step
+and the decay photon lines. The three time series are plotted against time *after
 shutdown*, the end of the last step that had a flux, not time from the start:
 a decay curve is read from shutdown, and on a log axis the year of irradiation
 ahead of it put every cooling point of the old default within a hundredth of
@@ -499,8 +499,11 @@ that it reads as the sum rather than as a nuclide or as "Other". `verify.mjs`
 moves the count both ways, adds the total and requires it to be the sum of the
 nuclides and "Other", and turns the nuclides off to leave the total alone.
 
-The decay photon lines are one step at a time, under a slider, and both axes
-are fixed once per run rather than per step: the x range from every step's
+The inventory and the decay photon lines are one step at a time, each under a
+slider of its own, opening on the last step. The inventory names the fifteen
+largest atom densities at that step, on an x axis fixed from every step's
+fifteen, so a bar's length means the same thing at every step. The photon
+plot's axes are fixed once per run the same way: the x range from every step's
 lines, the y range from the lowest floor to the strongest line over the run,
 each step drawing the lines within five decades of its own strongest. An axis
 that followed each step would rescale itself under the reader with every move
