@@ -198,16 +198,26 @@ print(f"{len(steps)} steps, {sum(activity[0].values()):.3e} Bq at the end of the
 
 
 def top_nuclides(per_step, count=6):
-    """The nuclides with the largest peak over the run.
+    """The nuclides worth naming: those that lead at some step, in the order
+    they first lead, then the largest peaks to fill the count.
 
     A full closure is hundreds of nuclides and almost all of them are noise at
-    every step; ranking by peak keeps the ones that ever mattered.
+    every step. Ranking by peak alone keeps the first hour's nuclides and hides
+    the ones that carry the years; leading at a step is what the plot is read
+    for, so leading is what earns a name. This is the page's rule.
     """
     peaks = {}
-    for step in per_step:
+    first_lead = {}
+    steps_led = {}
+    for i, step in enumerate(per_step):
         for name, value in step.items():
             peaks[name] = max(peaks.get(name, 0.0), value)
-    return [name for name, _ in sorted(peaks.items(), key=lambda kv: -kv[1])[:count]]
+        leader = max(step, key=step.get, default=None)
+        if leader is not None and step[leader] > 0:
+            first_lead.setdefault(leader, i)
+            steps_led[leader] = steps_led.get(leader, 0) + 1
+    ranked = sorted(peaks, key=lambda n: (-steps_led.get(n, 0), first_lead.get(n, len(per_step)), -peaks[n]))
+    return sorted(ranked[:count], key=lambda n: (first_lead.get(n, len(per_step)), -peaks[n]))
 
 
 def series_figure(per_step, title, y_label):

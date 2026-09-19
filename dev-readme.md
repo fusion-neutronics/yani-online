@@ -470,7 +470,23 @@ across eight and a half decades, which a log axis marks in the units a reader
 thinks in (1 s, 1 min, 1 h, 1 d, 30 d, 1 a, 10 a) rather than in powers of ten
 of years. The pulse itself is at zero and is drawn on a linear axis only, as
 is the irradiation history of a schedule with several pulses. The Python
-export plots the same axis. The contact dose is the odd one of the three time series: it
+export plots the same axis.
+
+Each series chart names up to four nuclides and sums the rest as "Other", four
+being the ceiling the colour palette clears. Which four is decided by who
+*leads*: every nuclide that is the largest at some step is named, in the order
+they first lead, and any slot left is filled by peak. It used to be the four
+largest peaks, and on aluminium those are Al28, Mg27, Na24 and its isomer,
+every one gone within a week, so from then on the whole inventory was the grey
+line and the chart hid the one thing it exists to show, which nuclide
+dominates at which decade. When more nuclides lead than there are slots, the
+ones leading for more of the log-spaced steps stay, then the earlier ones.
+"Other" can be the largest line at a step where no one nuclide dominates,
+which is a true reading. The Python export ranks its six the same way.
+`verify.mjs` runs aluminium and requires the largest series at the first step
+and at the last to be named.
+
+The contact dose is the odd one of the three time series: it
 is intensive, so unlike activity and decay heat it does not scale with the
 volume on the form -- the semi-infinite slab estimate cancels the geometry, and
 a bigger lump of the same material reads the same at contact. It opens on the
