@@ -266,6 +266,13 @@
         <span>Volume (cm&sup3;), required for activity and decay heat</span>
         <input id="volume" type="number" value="1000" step="any" min="0">
       </label>
+      <!-- With the material rather than the data: it is the material's
+           temperature, the way the wheel keeps it, and the cross sections are
+           read at the nearest one the library publishes. -->
+      <label>
+        <span>Temperature (K): cross sections are read at the nearest temperature the library publishes</span>
+        <input id="temperature" type="number" value="294" step="any" min="0">
+      </label>
     </section>
 
     <!-- ---------------------------------------------------------------- -->
@@ -278,10 +285,6 @@
       <label>
         <span>Cross sections</span>
         <select id="data-xs"></select>
-      </label>
-      <label>
-        <span>Temperature (K): the nearest temperature the library publishes is fetched</span>
-        <input id="temperature" type="number" value="294" step="any" min="0">
       </label>
       <label>
         <span>Transmutation reactions</span>

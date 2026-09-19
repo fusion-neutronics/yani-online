@@ -173,7 +173,7 @@ either framing: `read_arrow_file` sniffs the `ARROW1` magic. The MT set comes
 from `requiredMts` on the session, feature-detected at boot, so the page carries
 no copy of the chain kind to MT table.
 
-Which temperature is the **Temperature** field under the cross-section library,
+Which temperature is the **Temperature** field in the material section,
 294 K by default. Per nuclide the page takes the published label nearest it,
 chosen among the labels that carry a batch of a wanted MT and a grid: the index
 also lists a 0 K label, which on ENDF/B-8.1 carries elastic scattering and
