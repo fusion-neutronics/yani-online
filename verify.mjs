@@ -951,6 +951,41 @@ async function main() {
   eq(axis.ticks.join(" "), "1 s 1 min 1 h 1 d 30 d 1 a 10 a", "and marks the axis in units a reader thinks in");
   eq(axis.title, "time after shutdown", "under the right name");
 
+  // The inventory has a slider of its own, like the photon lines, and its x
+  // axis holds still across the steps for the same reason: a bar's length has
+  // to mean the same thing at every step for two steps to be comparable. The
+  // first step and the last differ in what they show, since the trace products
+  // of the first hour are gone by ten years.
+  const inventory = () => page.$eval("#plot-inventory", (el) => ({
+    title: el.layout.title.text,
+    range: JSON.stringify(el.layout.xaxis.range),
+    bars: el.data[0].y.slice(),
+  }));
+  const setInventoryStep = async (i) => {
+    await page.evaluate((i) => {
+      const slider = document.getElementById("inventory-step");
+      slider.value = String(i);
+      slider.dispatchEvent(new Event("input"));
+    }, i);
+    await page.waitForTimeout(250);
+  };
+  const inventorySteps = await page.$eval("#inventory-step", (el) => Number(el.max) + 1);
+  eq(inventorySteps, schedule.length, "the inventory slider has a step per result");
+  const lastInventory = await inventory();
+  eq(lastInventory.title, `Inventory at step ${inventorySteps}`, "the inventory opens on the last step");
+  const inventoryMoved = [];
+  for (let i = 0; i < inventorySteps; i++) {
+    await setInventoryStep(i);
+    if ((await inventory()).range !== lastInventory.range) inventoryMoved.push(i + 1);
+  }
+  if (!inventoryMoved.length) ok("the inventory x axis holds still across the steps");
+  else fail(`the inventory x axis moved at steps ${inventoryMoved.join(", ")}`);
+  await setInventoryStep(0);
+  const firstInventory = await inventory();
+  eq(firstInventory.title, "Inventory at step 1", "the slider changes the inventory's step");
+  eq(firstInventory.bars.join() !== lastInventory.bars.join(), true, "and the first step's inventory differs from the last");
+  await setInventoryStep(inventorySteps - 1);
+
   // The photon x axis holds still while the slider walks the steps. Its range
   // is set from every step's lines rather than the one drawn, so the reader
   // sees where the whole spectrum lives and nothing jumps as they scroll, and
