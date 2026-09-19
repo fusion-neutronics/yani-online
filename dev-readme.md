@@ -472,25 +472,38 @@ of years. The pulse itself is at zero and is drawn on a linear axis only, as
 is the irradiation history of a schedule with several pulses. The Python
 export plots the same axis.
 
-Each series chart names up to four nuclides and sums the rest as "Other", four
-being the ceiling the colour palette clears. Which four is decided by who
-*leads*: every nuclide that is the largest at some step is named, in the order
-they first lead, and any slot left is filled by peak. It used to be the four
-largest peaks, and on aluminium those are Al28, Mg27, Na24 and its isomer,
-every one gone within a week, so from then on the whole inventory was the grey
-line and the chart hid the one thing it exists to show, which nuclide
-dominates at which decade. When more nuclides lead than there are slots, the
-ones leading for more of the log-spaced steps stay, then the earlier ones.
-"Other" can be the largest line at a step where no one nuclide dominates,
-which is a true reading. The Python export ranks its six the same way.
-`verify.mjs` runs aluminium and requires the largest series at the first step
-and at the last to be named.
+Each series chart names some nuclides and sums the rest as "Other". How many
+is a control above the chart, beside the scale toggles, from one to eight, and
+four to open on; eight is the ceiling the colour palette clears (the data-viz
+method's reference palette, eight slots validated on each surface), not a
+default to tune, and a ninth would be a hue invented rather than assigned.
+Which nuclides is decided by who *leads*: every nuclide that is the largest at
+some step is named, in the order they first lead, and any slot left is filled
+by peak. It used to be the largest peaks, and on aluminium those are Al28,
+Mg27, Na24 and its isomer, every one gone within a week, so from then on the
+whole inventory was the grey line and the chart hid the one thing it exists to
+show, which nuclide dominates at which decade. When more nuclides lead than
+there are slots, the ones leading for more of the log-spaced steps stay, then
+the earlier ones. "Other" can be the largest line at a step where no one
+nuclide dominates, which is a true reading. The Python export ranks its six
+the same way. `verify.mjs` runs aluminium and requires the largest series at
+the first step and at the last to be named.
+
+Beside the count are two boxes, **total** and **by nuclide**, on every series
+chart. Activity and decay heat open by nuclide, because the question they
+answer is which product dominates and when; the contact dose opens on its
+total, because a dose is first a single number, whether the thing can be
+handled and after how long, and only then a question of what is driving it.
+Either box can be added to the other. The total is drawn in ink and dashed, so
+that it reads as the sum rather than as a nuclide or as "Other". `verify.mjs`
+moves the count both ways, adds the total and requires it to be the sum of the
+nuclides and "Other", and turns the nuclides off to leave the total alone.
 
 The contact dose is the odd one of the three time series: it
 is intensive, so unlike activity and decay heat it does not scale with the
 volume on the form -- the semi-infinite slab estimate cancels the geometry, and
 a bigger lump of the same material reads the same at contact. It opens on the
-total rather than a per-nuclide breakdown, with a checkbox for the breakdown,
+total rather than a per-nuclide breakdown, with the by-nuclide box to add it,
 because the first question a dose answers is whether the thing can be handled
 and only the second is what is driving it. Absorbed dose in air at a build-up
 factor of 2.0, which is what `Material.contact_dose()` defaults to in the wheel,
