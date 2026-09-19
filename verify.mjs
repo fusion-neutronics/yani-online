@@ -886,6 +886,49 @@ async function main() {
     else fail(`${id} drew nothing`);
   }
 
+  // The controls above a series chart: how many nuclides it names, whether
+  // the total is drawn, whether the nuclides are. Read off the activity chart
+  // by what it draws, since a control that renders and changes nothing is the
+  // failure this is for. The fixture set gives iron more than four products,
+  // so "Other" is non-empty at four and the count has room to move both ways.
+  const control = (name) => `.axis-scale[data-for="plot-activity"] [data-control="${name}"]`;
+  const drawn = () => page.$eval("#plot-activity", (el) => ({
+    names: el.data.map((t) => t.name),
+    first: Object.fromEntries(el.data.map((t) => [t.name, t.y[0]])),
+  }));
+  const namedCount = (d) => d.names.filter((n) => n !== "Other" && n !== "total").length;
+  const opening = await drawn();
+  eq(namedCount(opening), 4, "a series chart opens naming four nuclides");
+  eq(opening.names.includes("Other"), true, "with the rest as Other");
+  eq(opening.names.includes("total"), false, "and no total");
+  await page.selectOption(control("named"), "2");
+  await page.waitForTimeout(300);
+  eq(namedCount(await drawn()), 2, "the count control names fewer");
+  await page.selectOption(control("named"), "8");
+  await page.waitForTimeout(300);
+  const eight = await drawn();
+  eq(namedCount(eight) >= 5 && namedCount(eight) <= 8, true, `and more (${namedCount(eight)} at eight)`);
+  await page.selectOption(control("named"), "4");
+  await page.check(control("total"));
+  await page.waitForTimeout(300);
+  const withTotal = await drawn();
+  // Summed from the drawn traces, which the log floor has cut six decades
+  // below the peak, so the sum runs a few parts in a billion short of the
+  // total: within a hundred thousandth is the floor's dust and no more.
+  const summed = withTotal.names.filter((n) => n !== "total").reduce((n, k) => n + (withTotal.first[k] || 0), 0);
+  if (withTotal.names.includes("total") && Math.abs(withTotal.first.total / summed - 1) < 1e-5) {
+    ok("the total box adds a total that is the sum of the nuclides and Other");
+  } else {
+    fail(`the total box drew ${withTotal.names.join(", ")}, total ${withTotal.first.total} against a sum of ${summed}`);
+  }
+  await page.uncheck(control("byNuclide"));
+  await page.waitForTimeout(300);
+  eq((await drawn()).names.join(","), "total", "the by-nuclide box off leaves the total alone");
+  await page.check(control("byNuclide"));
+  await page.uncheck(control("total"));
+  await page.waitForTimeout(300);
+  eq(namedCount(await drawn()), 4, "and the chart comes back as it opened");
+
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching
   // against the end of the year of irradiation; the pulse itself sits at zero,

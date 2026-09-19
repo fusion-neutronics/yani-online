@@ -1,24 +1,27 @@
 // The charts, drawn with plotly-basic.
 //
-// Palette and mark specs follow the data-viz method. The categorical hues were
-// run through its validator rather than chosen by eye:
+// Palette and mark specs follow the data-viz method. The categorical hues are
+// its reference palette, eight slots stepped for each surface, run through its
+// validator rather than chosen by eye:
 //
-//   light  #2a78d6 #eb6834 #1baf7a #eda100  -> ALL CHECKS PASS
-//   dark   #3987e5 #d95926 #199e70 #c98500  -> ALL CHECKS PASS
+//   light  #2a78d6 #eb6834 #1baf7a #eda100 #e87ba4 #008300 #4a3aa7 #e34948  -> ALL CHECKS PASS
+//   dark   #3987e5 #d95926 #199e70 #c98500 #d55181 #008300 #9085e9 #e66767  -> ALL CHECKS PASS
 //
-// Four entity slots, in fixed order, never cycled. A fifth nuclide does not get
-// a generated hue -- it folds into "Other", which is deliberately grey because
-// it is an aggregate rather than an identity, and so is not a categorical slot
-// at all.
+// Eight entity slots, in fixed order, never cycled. A ninth nuclide does not
+// get a generated hue -- it folds into "Other", which is deliberately grey
+// because it is an aggregate rather than an identity, and so is not a
+// categorical slot at all. A total, when one is drawn, is ink rather than a hue
+// for the same reason, and dashed so it cannot be taken for "Other" in print.
 //
-// Light-mode aqua and yellow sit below 3:1 on the light surface, which the
-// validator flags as needing relief. That is why every series is direct-labeled
-// at its last point in addition to the legend: identity never rests on colour
-// alone, and the low-contrast pair always carries a visible label.
+// Light-mode aqua, yellow and magenta sit below 3:1 on the light surface, which
+// the validator flags as needing relief. That is why every series is
+// direct-labeled at its last point in addition to the legend: identity never
+// rests on colour alone, and the low-contrast hues always carry a visible
+// label.
 
 const SERIES = {
-  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
-  dark: ["#3987e5", "#d95926", "#199e70", "#c98500"],
+  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
+  dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
 };
 const OTHER = { light: "#8a8a85", dark: "#7d7d76" };
 const INK = {
@@ -26,10 +29,13 @@ const INK = {
   dark: { primary: "#ffffff", secondary: "#c3c2b7", grid: "#2e2e2c", surface: "#1a1a19" },
 };
 
-/// Four entities plus "Other" is the ceiling, not a default to tune. Past four
-/// the validator cannot clear its floors, and a fifth hue would be invented
-/// rather than assigned.
-const TOP_N = 4;
+/// How many nuclides a chart names, at most. Eight is the palette's ceiling,
+/// not a default to tune: past it the validator cannot clear its floors, and a
+/// ninth hue would be invented rather than assigned. Four is where a chart
+/// opens, which is about as many lines as read at a glance; the control above
+/// each chart goes from one to eight.
+const NAMED_MAX = 8;
+const NAMED_DEFAULT = 4;
 
 const mode = () =>
   document.documentElement.dataset.theme === "dark" ||
@@ -148,20 +154,25 @@ const AXES = {
   "plot-photons": ["x", "y"],
 };
 
-/// Charts that read either as one total or split by nuclide, and which they
-/// open on.
+/// What each series chart draws, the total, the nuclides that lead, or both,
+/// and how it opens.
 ///
-/// Only the dose has this. Activity and decay heat are read by nuclide by
-/// default because the question they answer is which product dominates and
-/// when. A contact dose is first a single number -- whether the thing can be
-/// handled, and after how long -- and only then a question of what is driving
-/// it, so it opens on the total and the breakdown is there when the first
-/// answer prompts the second.
-const BREAKDOWN = { "plot-dose": false };
+/// Activity and decay heat open by nuclide because the question they answer is
+/// which product dominates and when. A contact dose is first a single number
+/// -- whether the thing can be handled, and after how long -- and only then a
+/// question of what is driving it, so it opens on the total and the breakdown
+/// is a checkbox away. Every chart has both boxes, and the count of nuclides
+/// it names, above it beside the scale toggles.
+const VIEWS = {
+  "plot-activity": { total: false, byNuclide: true },
+  "plot-heat": { total: false, byNuclide: true },
+  "plot-dose": { total: true, byNuclide: false },
+};
 
-const breakdowns = new Map();
-const breakdownOf = (id) =>
-  breakdowns.has(id) ? breakdowns.get(id) : BREAKDOWN[id];
+const views = new Map();
+const viewOf = (id) => ({ ...VIEWS[id], ...(views.get(id) || {}) });
+const named = new Map();
+const namedOf = (id) => named.get(id) || NAMED_DEFAULT;
 
 /// Log everywhere by default, which is what these quantities are read on:
 /// activity over a decade of cooling, a spectrum across ten decades of energy.
@@ -211,20 +222,41 @@ export function wireAxisScales(onChange) {
       label.append(name, select);
       bar.append(label);
     }
-    if (id in BREAKDOWN) {
-      const label = document.createElement("label");
-      const check = document.createElement("input");
-      check.type = "checkbox";
-      check.checked = breakdownOf(id);
-      const name = document.createElement("span");
-      name.textContent = "by nuclide";
-      check.addEventListener("change", () => {
-        breakdowns.set(id, check.checked);
+    if (id in VIEWS) {
+      const count = document.createElement("label");
+      const countName = document.createElement("span");
+      countName.textContent = "nuclides";
+      const select = document.createElement("select");
+      select.dataset.control = "named";
+      for (let n = 1; n <= NAMED_MAX; n++) {
+        const option = document.createElement("option");
+        option.value = option.textContent = String(n);
+        option.selected = n === namedOf(id);
+        select.append(option);
+      }
+      select.addEventListener("change", () => {
+        named.set(id, Number(select.value));
         onChange(id);
       });
-      label.append(name, check);
-      bar.append(label);
+      count.append(countName, select);
+      bar.append(count);
+      for (const [key, text] of [["total", "total"], ["byNuclide", "by nuclide"]]) {
+        const label = document.createElement("label");
+        const check = document.createElement("input");
+        check.type = "checkbox";
+        check.dataset.control = key;
+        check.checked = viewOf(id)[key];
+        const name = document.createElement("span");
+        name.textContent = text;
+        check.addEventListener("change", () => {
+          views.set(id, { ...viewOf(id), [key]: check.checked });
+          onChange(id);
+        });
+        label.append(name, check);
+        bar.append(label);
+      }
     }
+    bar.dataset.for = id;
     (plot.closest(".plot-wrap") || plot).before(bar);
   }
 }
@@ -248,7 +280,7 @@ export function wireAxisScales(onChange) {
 /// for more of the curve. "Other" is the sum of everything unnamed, and can be
 /// the largest line at a step where no one nuclide dominates; that is a true
 /// reading rather than a failure of the rule.
-function topSeries(perStep) {
+function topSeries(perStep, count) {
   const keys = new Set();
   for (const step of perStep) for (const k of Object.keys(step)) keys.add(k);
   const peak = new Map();
@@ -278,7 +310,7 @@ function topSeries(perStep) {
   });
   // Drawn in the order they first lead, so the legend reads as the run does,
   // with the fill-ins after by peak.
-  const top = ranked.slice(0, TOP_N).sort((a, b) => {
+  const top = ranked.slice(0, count).sort((a, b) => {
     const fa = leads.get(a) ? leads.get(a).first : Infinity;
     const fb = leads.get(b) ? leads.get(b).first : Infinity;
     return fa - fb || peak.get(b) - peak.get(a);
@@ -298,19 +330,14 @@ function topSeries(perStep) {
 /// everything that matters. Six decades below the largest value is the floor.
 const DECADES = 6;
 
-/// One series carrying a per-step total, shaped like `topSeries` returns so the
-/// rest of the chart does not care which it was handed.
-function totalSeries(results, key, name) {
-  const values = results.map((r) => r[key] || 0);
-  return { series: [{ name, values }], peak: Math.max(...values) };
-}
-
-/// `total` names a per-step scalar and the label to draw it under. Given one,
-/// the chart obeys its breakdown checkbox; without one it is always by nuclide.
-function decaySeriesChart(el, results, key, title, yLabel, total = null) {
+/// `total` names the per-step scalar the chart's total line is drawn from.
+/// What is drawn is the chart's view: the nuclides that lead, the total, or
+/// both, and how many nuclides are named, from the controls above it.
+function decaySeriesChart(el, results, key, title, yLabel, total) {
   const m = mode();
   const xType = scaleOf(el.id, "x");
   const yType = scaleOf(el.id, "y");
+  const view = viewOf(el.id);
   const shutdown = shutdownTime(results);
   const times = results.map((r) => r.time - shutdown);
   const { scale, unit } = timeAxis(times);
@@ -322,30 +349,45 @@ function decaySeriesChart(el, results, key, title, yLabel, total = null) {
     ? TIME_MARKS.filter(([t]) => t >= Math.min(...after) / 1.5 && t <= Math.max(...after) * 1.5)
     : [];
   const label = xType === "log" && marks.length ? "time after shutdown" : `time after shutdown [${unit}]`;
-  const { series, peak } =
-    total && !breakdownOf(el.id)
-      ? totalSeries(results, total.key, total.name)
-      : topSeries(results.map((r) => r[key] || {}));
+  const series = [];
+  if (view.byNuclide) {
+    series.push(...topSeries(results.map((r) => r[key] || {}), namedOf(el.id)).series);
+  }
+  if (view.total) {
+    series.push({ name: total.name, values: results.map((r) => r[total.key] || 0), total: true });
+  }
+  const peak = Math.max(0, ...series.flatMap((s) => s.values));
   if (peak <= 0) {
+    // Nothing to draw: no view chosen, or nothing in the results. An empty
+    // frame rather than the previous view left standing under the new
+    // controls.
     Plotly.purge(el);
     return;
   }
   const floor = peak / 10 ** DECADES;
 
-  const traces = series.map((s, i) => ({
-    type: "scatter",
-    mode: "lines+markers",
-    name: s.name,
-    x,
-    // The floor is a log-axis concern: it stops decayed-away dust from setting
-    // the scale. On linear the dust sits on the axis line and costs nothing, so
-    // the series is drawn whole rather than cut off.
-    y: s.values.map((v) => (yType === "log" && v <= floor ? null : v)),
-    line: { width: 2, color: s.other ? OTHER[m] : SERIES[m][i] },
-    marker: { size: 8, color: s.other ? OTHER[m] : SERIES[m][i] },
-    connectgaps: false,
-    hovertemplate: "%{y:.3e}<extra>" + s.name + "</extra>",
-  }));
+  // Hues go to entities, in slot order; the aggregates take ink. Counted
+  // rather than indexed, so "Other" and the total between or before named
+  // nuclides do not shift the slots.
+  let slot = 0;
+  const colourOf = (s) => (s.other ? OTHER[m] : s.total ? INK[m].primary : SERIES[m][slot++]);
+  const traces = series.map((s) => {
+    const colour = colourOf(s);
+    return {
+      type: "scatter",
+      mode: "lines+markers",
+      name: s.name,
+      x,
+      // The floor is a log-axis concern: it stops decayed-away dust from
+      // setting the scale. On linear the dust sits on the axis line and costs
+      // nothing, so the series is drawn whole rather than cut off.
+      y: s.values.map((v) => (yType === "log" && v <= floor ? null : v)),
+      line: { width: 2, color: colour, ...(s.total ? { dash: "dash" } : {}) },
+      marker: { size: 8, color: colour },
+      connectgaps: false,
+      hovertemplate: "%{y:.3e}<extra>" + s.name + "</extra>",
+    };
+  });
 
   // Direct labels at the last point, in ink rather than the series colour --
   // the marker beside the text carries identity. This is also the relief the
@@ -661,11 +703,13 @@ export function drawAll(results) {
     document.getElementById("plot-activity"),
     results, "activity_by_nuclide",
     "Activity", "activity [Bq]",
+    { key: "activity", name: "total" },
   );
   decaySeriesChart(
     document.getElementById("plot-heat"),
     results, "decay_heat_by_nuclide",
     "Decay heat", "decay heat [W]",
+    { key: "decay_heat", name: "total" },
   );
   // Gy/h, absorbed dose in air, at a build-up factor of 2. A slab estimate
   // rather than a transport result, so it carries no distance: it is the dose
