@@ -304,12 +304,9 @@
       <div data-panel="preset">
         <label>
           <span>Shape</span>
-          <select id="spectrum-preset">
-            <option value="fusion-fw">Fusion first wall (14 MeV peaked)</option>
-            <option value="dt-point">D-T point source (unmoderated)</option>
-            <option value="fission-pwr">Fission, PWR-like</option>
-            <option value="thermal">Thermal Maxwellian</option>
-          </select>
+          <!-- Filled from src/spectra.js at boot: the presets are generated
+               data, and a list kept here would drift from it. -->
+          <select id="spectrum-preset"></select>
         </label>
       </div>
 

@@ -25,6 +25,7 @@ import {
   planFetch, planNuclide, publishedTemperatures, rangeHeader, reactionRanges, spliceStream,
   wantedParts,
 } from "./src/ranges.js";
+import { SPECTRA } from "./src/spectra.js";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
 // a sibling checkout, which is where they land after
@@ -300,6 +301,55 @@ function checkRanges() {
   eq(single.energy, null, "and so is one covering the whole grid file");
 }
 
+/// Check the spectrum presets, without a browser.
+///
+/// They are generated data (spectra/make_spectra.py), so what can go wrong is
+/// what goes wrong with data: a file half-written, a preset copied over another,
+/// a shape that is not one. The physics of each is the generator's business and
+/// is not re-derived here; what is checked is that the seven are seven, that each
+/// is a shape on the same structure, and that the two emissions and the five
+/// first-wall spectra sit where they should relative to each other.
+function checkSpectra() {
+  const keys = Object.keys(SPECTRA);
+  eq(keys.length, 7, "seven spectrum presets");
+  eq([...new Set(keys.map((k) => SPECTRA[k].structure))].join(","), "CCFE-709", "all on one structure");
+  eq([...new Set(keys.map((k) => SPECTRA[k].values.length))].join(","), "709", "one value per group");
+  let shapes = 0;
+  for (const key of keys) {
+    const { values, label, description } = SPECTRA[key];
+    const sum = values.reduce((n, v) => n + v, 0);
+    if (Math.abs(sum - 1) > 1e-3) fail(`${key} sums to ${sum}, not one`);
+    else if (values.some((v) => !(v >= 0))) fail(`${key} has a negative or missing value`);
+    else if (!label || !description) fail(`${key} has no label or description`);
+    else shapes++;
+  }
+  eq(shapes, keys.length, "every preset is a non-negative shape summing to one, labelled");
+
+  // A copy of one spectrum under five names passes everything above.
+  const fingerprint = (k) => SPECTRA[k].values.map((v) => v.toExponential(3)).join();
+  eq(new Set(keys.map(fingerprint)).size, keys.length, "no two presets are the same spectrum");
+
+  // Where the mass sits. The groups ascend in energy, so the D-T emission peaks
+  // in a higher group than the D-D one, and both are narrow: a Gaussian a few
+  // hundred keV wide covers a handful of the 709 groups. A first-wall spectrum
+  // is the same source after a blanket has scattered it, so it is spread over
+  // hundreds of groups, and it still carries the uncollided source: the group
+  // the D-T emission peaks in holds a good percent of every one of them. Not
+  // its peak group, though. In the lithium-lead blankets the flux the breeder
+  // reflects, multiplied by (n,2n) on lead and slowed by inelastic scattering,
+  // outweighs the source at a few hundred keV, which is a finding rather than
+  // a fault.
+  const argmax = (k) => SPECTRA[k].values.indexOf(Math.max(...SPECTRA[k].values));
+  const populated = (k) => SPECTRA[k].values.filter((v) => v > 1e-6).length;
+  const sourceGroup = argmax("dt-plasma");
+  eq(sourceGroup > argmax("dd-plasma"), true, "the D-T emission peaks above the D-D one");
+  eq(populated("dt-plasma") < 40 && populated("dd-plasma") < 40, true, "the emissions are narrow");
+  for (const key of keys.filter((k) => k.startsWith("fw-"))) {
+    eq(populated(key) > 250, true, `${key} is spread across the structure`);
+    eq(SPECTRA[key].values[sourceGroup] > 0.01, true, `${key} carries the uncollided source`);
+  }
+}
+
 /// Check what gets handed to the solver, out of what came back.
 ///
 /// The fetch answers in whatever order the network does, so this is where a
@@ -483,6 +533,7 @@ async function main() {
   // arithmetic the cross-section fetch is built on.
   checkRanges();
   checkAssembly();
+  checkSpectra();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
     await checkLive(named.length ? named : ["Li6", "Al27"]);
@@ -635,6 +686,9 @@ async function main() {
     ["import yani", /^import yani$/m],
     ["a material", /^material = yani\./m],
     ["the spectrum", /yani\.sources\.Histogram\(/],
+    // By the structure's name, not 710 inlined boundaries: the preset is a flux
+    // on CCFE-709 and the wheel resolves that itself.
+    ["the group structure", /yani\.sources\.Histogram\("CCFE-709", flux\)/],
     ["the schedule", /yani\.PulseSchedule\(\[/],
     ["the run", /material\.transmute\(schedule=schedule\)/],
     // At its defaults, which is the point: those defaults are what the page
@@ -672,17 +726,25 @@ async function main() {
   await page.fill("#composition input[data-k='name']", before);
   await page.click('[data-tab="pnnl"]');
 
-  // And that it follows the form rather than being drawn once. A preset with a
-  // different group count is the cheapest thing to check it against.
-  await page.selectOption("#spectrum-preset", "thermal");
+  // The presets are offered from the data, so the dropdown has to carry every
+  // one of them, and the spectrum has to follow the form rather than being
+  // drawn once. Every preset has the same group count now, so the curve itself
+  // is compared: the unmoderated emission and a first-wall spectrum share no
+  // more than their peak.
+  const offered = await page.$$eval("#spectrum-preset option", (opts) => opts.map((o) => o.value));
+  eq(offered.join(","), Object.keys(SPECTRA).join(","), "the dropdown offers every preset in order");
+  const curve = () => page.$eval("#plot-spectrum", (el) => JSON.stringify(el.data[0].y.slice(0, 200)));
+  const firstWall = await curve();
+  await page.selectOption("#spectrum-preset", "dt-plasma");
   await page.waitForFunction(
-    () => document.getElementById("spectrum-status").textContent.startsWith("5 groups"),
-    null, { timeout: 5000 },
+    (before) => document.getElementById("spectrum-status").textContent.startsWith("709 groups")
+      && JSON.stringify(document.getElementById("plot-spectrum").data[0].y.slice(0, 200)) !== before,
+    firstWall, { timeout: 5000 },
   ).then(
-    () => ok("the spectrum follows the preset"),
-    () => fail(`the spectrum did not follow the preset: ${document && "see #spectrum-status"}`),
+    () => ok("the spectrum follows the preset, on 709 groups"),
+    () => fail("the spectrum did not follow the preset"),
   );
-  await page.selectOption("#spectrum-preset", "fusion-fw");
+  await page.selectOption("#spectrum-preset", offered[0]);
 
   if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though

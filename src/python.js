@@ -79,7 +79,9 @@ function materialSource(material, temperature) {
 function spectrumSource(spectrum) {
   if (spectrum.structure) {
     return [
-      `# ${spectrum.structure}, resolved by name inside yani.`,
+      spectrum.label
+        ? `# ${spectrum.label}, one of the page's presets, on ${spectrum.structure}, resolved by name inside yani.`
+        : `# ${spectrum.structure}, resolved by name inside yani.`,
       `flux = ${list(spectrum.values)}`,
       `spectrum = yani.NeutronSource(`,
       `    energy=yani.sources.Histogram(${str(spectrum.structure)}, flux)`,
