@@ -554,6 +554,35 @@ Chromium is installed here, so that is what this release was checked against.
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
 one, so CI currently gates on everything up to the first solve.
 
+## Session export
+
+**Export this session as one HTML file** writes the page with the setup and the
+results inside it. Opened anywhere, from `file://` with no network, it comes up
+on the saved run: the form as it was (material, libraries, temperature,
+spectrum, schedule) and the charts drawn from the solver's own results, with
+the sliders sized to the run. A run started from it fetches the data again, as
+the page always does; the status line says so.
+
+The page's own DOM is the source of the export, cloned and put back the way
+the page is before boot (plots emptied, control bars removed, results hidden),
+because the built page is one file and the only copy of itself in reach: a
+`fetch` of `location.href` is refused from `file://`, which is where an
+exported file lives and where it may be exported from again. The session
+rides in a `<script type="application/json" id="yani-session">`, gzipped and
+base64, and boot restores it last, after every control it drives is wired, by
+driving the form the way a reader does so that the budget, the spectrum plot
+and the material in the solver all follow.
+
+The cross sections are not in the file. They live in the worker's wasm memory,
+transferred there, and a closure's worth is a hundred MB and more; a file that
+size is not one anyone opens. The note under the button says what the file
+carries.
+
+`verify.mjs` clicks the button, opens the file it writes in a fresh page with
+the data origin unreachable, and requires the run to be there: the same peak
+activity to the last digit, the same schedule, material, temperature and
+preset, the stepped charts sized to the run, and no request for data.
+
 Not yet done:
 
-- the single-file session export is not implemented
+- nothing outstanding from the original list

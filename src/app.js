@@ -731,8 +731,8 @@ async function currentSetup() {
   // A preset goes out by its structure's name, as a pasted flux does, so the
   // script resolves the 710 boundaries itself rather than carrying them.
   const spectrum = activeTab(panel) === "preset"
-    ? { label: preset.label, structure: preset.structure, values: preset.values }
-    : { structure: $("group-structure").value, values: (await currentSpectrum()).values };
+    ? { preset: $("spectrum-preset").value, label: preset.label, structure: preset.structure, values: preset.values }
+    : { structure: $("group-structure").value, text: $("group-flux").value, values: (await currentSpectrum()).values };
 
   return {
     libraries: {
@@ -910,6 +910,136 @@ async function ensureData() {
     (saved ? `, skipping ${mb(saved)} of other temperatures and transport cross sections.` : "."));
 }
 
+/// Put `state.results` on the charts, from a run just finished or a session
+/// just restored.
+function showResults() {
+  $("results-empty").hidden = true;
+  $("results").hidden = false;
+  // The two stepped charts open on the last step, which is the answer most
+  // runs are after: what is left, and what it emits, at the end.
+  for (const id of ["photon-step", "inventory-step"]) {
+    const slider = $(id);
+    slider.max = String(state.results.length - 1);
+    slider.value = String(state.results.length - 1);
+    $(`${id}-label`).value = state.results.length;
+  }
+  drawAll(state.results);
+  drawInventory(state.results, state.results.length - 1);
+  drawPhotons(state.results, state.results.length - 1);
+}
+
+// --- the session, as one file ---------------------------------------------
+
+/// Gzip text and base64 it, the inverse of `gunzipB64`. The results of a large
+/// closure are a few MB of JSON that squeeze by ten, and base64 is what keeps
+/// the bytes safe inside an HTML element.
+async function gzipToB64(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+  const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/// This page, as a file that opens on the saved session.
+///
+/// The page's own DOM is the source. The built page is one file and this is
+/// the only copy of itself in reach: a `fetch` of `location.href` is refused
+/// from `file://`, which is where an exported file lives and where it may be
+/// exported from again. The clone is put back the way the page is before boot,
+/// because boot runs again when the file opens: the plots emptied, the control
+/// bars removed (boot inserts them), the results hidden, Plotly's injected
+/// styles dropped. What boot cannot know is in a script element of type
+/// application/json, the setup as the Python export sees it and the results as
+/// the solver returned them, gzipped and base64 so a large closure does not
+/// double the file, and boot restores it before it would fetch anything.
+///
+/// The cross sections are not in it. They live in the worker's wasm memory,
+/// transferred there byte by byte, and a closure's worth is a hundred MB and
+/// more: a file that size is not one anyone opens. So the exported page shows
+/// this run without a network, and a run started from it fetches the data
+/// again, as the page always does.
+async function sessionDocument(session) {
+  const doc = document.documentElement.cloneNode(true);
+  for (const el of doc.querySelectorAll(".plot")) el.replaceChildren();
+  for (const el of doc.querySelectorAll('.axis-scale, #yani-session, style[id^="plotly"]')) el.remove();
+  doc.querySelector("#results").hidden = true;
+  doc.querySelector("#results-empty").hidden = false;
+  doc.querySelector("#warning").hidden = true;
+  doc.querySelector("#progress").hidden = true;
+  const payload = document.createElement("script");
+  payload.type = "application/json";
+  payload.id = "yani-session";
+  payload.textContent = await gzipToB64(JSON.stringify(session));
+  doc.querySelector("body").append(payload);
+  return `<!doctype html>\n${doc.outerHTML}`;
+}
+
+/// Put a saved session back: the form as it was, and the results on the charts.
+///
+/// The form is driven the way a reader drives it, tabs clicked and values set,
+/// so that everything that hangs off those controls (the budget, the spectrum
+/// plot, the material in the solver) follows without a second code path. The
+/// results are the solver's own from the saved run, so nothing is recomputed
+/// and nothing is fetched; a run from here starts a fetch as any run does.
+async function restoreSession(session) {
+  const { setup, results } = session;
+  for (const [id, key] of [
+    ["data-xs", "xs"], ["data-reactions", "reactions"], ["data-decay", "decay"],
+    ["data-fpy", "fission_yields"], ["data-branching", "branching"],
+  ]) {
+    if (setup.libraries && setup.libraries[key]) $(id).value = setup.libraries[key];
+  }
+  $("temperature").value = String(setup.temperature ?? 294);
+
+  const materialPanel = document.querySelector(".panel");
+  if (setup.material.kind === "pnnl") {
+    materialPanel.querySelector('[role="tab"][data-tab="pnnl"]').click();
+    const select = $("pnnl-select");
+    if (![...select.options].some((o) => o.value === setup.material.name)) {
+      // The picker shows the first four hundred names; a saved one past them
+      // is added so the selection can be made at all.
+      const option = document.createElement("option");
+      option.value = option.textContent = setup.material.name;
+      select.prepend(option);
+    }
+    select.value = setup.material.name;
+  } else {
+    materialPanel.querySelector('[role="tab"][data-tab="custom"]').click();
+    state.composition = Object.entries(setup.material.composition).map(([name, fraction]) => ({ name, fraction }));
+    renderComposition();
+    $("density").value = String(setup.material.density);
+    $("density-units").value = setup.material.units;
+    $("fraction-type").value = setup.material.fractionType;
+  }
+  $("volume").value = String(setup.material.volume);
+
+  const spectrumPanel = [...document.querySelectorAll(".panel")].find((p) =>
+    p.querySelector("#spectrum-preset, #group-structure"));
+  if (setup.spectrum.preset && SPECTRA[setup.spectrum.preset]) {
+    spectrumPanel.querySelector('[role="tab"][data-tab="preset"]').click();
+    $("spectrum-preset").value = setup.spectrum.preset;
+  } else {
+    spectrumPanel.querySelector('[role="tab"][data-tab="groups"]').click();
+    $("group-structure").value = setup.spectrum.structure;
+    $("group-flux").value = setup.spectrum.text || setup.spectrum.values.join(" ");
+  }
+
+  state.schedule = setup.schedule.map((step) => ({ ...step }));
+  renderSchedule();
+
+  state.results = results;
+  showResults();
+  refreshSpectrum();
+  refreshBudget();
+  const saved = session.saved ? new Date(session.saved) : null;
+  setStatus(
+    `Restored a session saved ${saved ? saved.toLocaleString() : "earlier"}: ` +
+    `${results.length} steps. Run to recompute it, which fetches the data again.`);
+}
+
 async function run() {
   const btn = $("run");
   btn.disabled = true;
@@ -937,19 +1067,7 @@ async function run() {
     } finally {
       clearInterval(tick);
     }
-    $("results-empty").hidden = true;
-    $("results").hidden = false;
-    // The two stepped charts open on the last step, which is the answer most
-    // runs are after: what is left, and what it emits, at the end.
-    for (const id of ["photon-step", "inventory-step"]) {
-      const slider = $(id);
-      slider.max = String(state.results.length - 1);
-      slider.value = String(state.results.length - 1);
-      $(`${id}-label`).value = state.results.length;
-    }
-    drawAll(state.results);
-    drawInventory(state.results, state.results.length - 1);
-    drawPhotons(state.results, state.results.length - 1);
+    showResults();
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
     warn(String(e.message || e));
@@ -1164,6 +1282,21 @@ async function main() {
   });
 
   $("run").addEventListener("click", run);
+  $("export").addEventListener("click", async () => {
+    try {
+      warn("");
+      if (!state.results) throw new Error("run first: the export carries this run's results");
+      const setup = await currentSetup();
+      const saved = new Date();
+      const stamp = saved.toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      downloadFile(
+        `yani_session_${stamp}.html`,
+        await sessionDocument({ saved: saved.toISOString(), setup, results: state.results }),
+        "text/html");
+    } catch (e) {
+      warn(`Cannot export the session: ${e.message || e}`);
+    }
+  });
   $("download-python").addEventListener("click", async () => {
     try {
       warn("");
@@ -1211,6 +1344,17 @@ async function main() {
     $("photon-step-label").value = i + 1;
     if (state.results) drawPhotons(state.results, i);
   });
+
+  // A file exported from this page carries its session; put it back, last, so
+  // that every control it drives is wired. Nothing is fetched for it.
+  const saved = document.getElementById("yani-session");
+  if (saved) {
+    try {
+      await restoreSession(JSON.parse(await gunzipB64(saved.textContent.trim())));
+    } catch (e) {
+      warn(`This file carries a saved session that could not be restored: ${e.message || e}`);
+    }
+  }
 }
 
 main().catch((e) => {
