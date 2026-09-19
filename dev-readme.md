@@ -322,6 +322,52 @@ yani-core-0.11.0 a solve against one says so -- "the fission-yields subsection i
 not loaded, but 88 nuclides in this material have a non-zero fission rate" --
 where it used to drop those products silently.
 
+## Spectrum presets
+
+The spectra the **Preset** tab offers are generated data, in `src/spectra.js`,
+written by `spectra/make_spectra.py`. Seven of them, all on the CCFE-709 group
+structure, one value per group, summing to one:
+
+- **Five first-wall spectra**, one per blanket concept, tallied with yamc. The
+  model is the same three shells around a plasma void every time, and only the
+  breeder zone changes: a 1 m void with the source at its centre, 3 cm of
+  Eurofer first wall, 60 cm of homogenised breeder zone, 10 cm of Eurofer rear
+  wall, vacuum beyond. The tally is the track-length flux in the first-wall
+  shell in the 709 groups. The breeder zones are HCPB (Be and Li4SiO4 pebbles,
+  helium), HCLL (Pb-17Li, helium), WCLL (Pb-17Li, water), WCCB (Li2TiO3 and
+  Be12Ti pebbles, water) and FLiBe (Li2BeF4), each homogenised by volume
+  fraction over its constituents with Eurofer structure. The fractions are
+  representative of the concepts rather than any one design's, and they are
+  all in the script's `BLANKETS` table, which is the thing to edit for a
+  different study. Every material is read at 600 K.
+- **Two unmoderated emissions**, D-T and D-D, the Gaussian of Ballabio et al.
+  at 20 keV ion temperature as `yamc.sources.fusion_neutron_spectrum` gives it,
+  integrated over the groups. The same D-T distribution is the source of the
+  five models above.
+
+The boundaries are not in the file. A preset names its structure and the page
+asks the solver for the boundaries by name, exactly as the pasted-flux tab does,
+so there is no second copy of 710 numbers to drift from the wheel's; the Python
+export writes the preset out as `Histogram("CCFE-709", flux)` for the same
+reason. The dropdown is filled from the file at boot, so adding a preset is
+adding an entry to the generator.
+
+Regenerating is `python spectra/make_spectra.py` with `pip install yamc` and
+about ten minutes: 4,000,000 source neutrons per model, which is 47 s of
+transport for FLiBe and 194 s for HCLL on 32 threads (20,000 to 80,000
+particles a second, the lead being the slow one), and more than 99.9% of each
+spectrum lands in groups whose relative error is under 5%. The first run also
+downloads the transport data for the nuclides in these materials, a few
+hundred MB into `~/.cache/yamc`. The generator takes `--particles` for a quick
+look and `--out` to write somewhere other than `src/spectra.js`.
+
+`verify.mjs` checks the file rather than the physics: seven presets on one
+structure, each a non-negative shape summing to one, no two the same, the D-T
+emission peaking above the D-D one and both narrow, and every first-wall
+spectrum spread across the structure while still peaking in the source's
+group. In the browser it checks the dropdown offers every preset and that the
+plotted curve follows a change of preset.
+
 ## Speed
 
 Two numbers, and they are different questions. The first solve carries the
