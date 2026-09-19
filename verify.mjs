@@ -916,8 +916,11 @@ async function main() {
   const photonAxis = () => page.$eval("#plot-photons", (el) => ({
     range: JSON.stringify(el.layout.xaxis.range),
     type: el.layout.xaxis.type,
-    // The marker trace carries one point per line, in MeV.
+    yRange: JSON.stringify(el.layout.yaxis.range),
+    yType: el.layout.yaxis.type,
+    // The marker trace carries one point per line, in MeV and photons/s.
     lines: el.data[1].x.slice(),
+    intensities: el.data[1].y.slice(),
   }));
   const setPhotonStep = async (i) => {
     await page.evaluate((i) => {
@@ -930,22 +933,43 @@ async function main() {
   const stepCount = await page.$eval("#photon-step", (el) => Number(el.max) + 1);
   const initial = await photonAxis();
   const [lo, hi] = JSON.parse(initial.range);
+  const [yLo, yHi] = JSON.parse(initial.yRange);
   const moved = [];
+  const movedY = [];
   let outside = 0;
+  let outsideY = 0;
+  let peaks = 0;
   for (let i = 0; i < stepCount; i++) {
     await setPhotonStep(i);
     const axis = await photonAxis();
     if (axis.range !== initial.range) moved.push(i + 1);
-    // A log axis's range is in decades; the lines are in MeV either way.
+    if (axis.yRange !== initial.yRange) movedY.push(i + 1);
+    // A log axis's range is in decades; the lines are in MeV and photons/s
+    // either way.
     for (const x of axis.lines) {
       const v = axis.type === "log" ? Math.log10(x) : x;
       if (v < lo || v > hi) outside++;
     }
+    for (const y of axis.intensities) {
+      const v = axis.yType === "log" ? Math.log10(y) : y;
+      if (v < yLo || v > yHi) outsideY++;
+    }
+    // The y range is set from the strongest line of the whole run, so at
+    // least one step's strongest has to come close to its top: an axis with
+    // decades of empty headroom passes the containment check and is still
+    // wrong.
+    const strongest = Math.max(...axis.intensities);
+    const top = axis.yType === "log" ? Math.log10(strongest) : strongest;
+    if (top > yHi - 1.5) peaks++;
   }
   if (!moved.length) ok(`the photon x axis holds still across ${stepCount} steps`);
   else fail(`the photon x axis moved at steps ${moved.join(", ")}`);
   if (!outside) ok("and its initial range covers every step's lines");
   else fail(`${outside} photon lines fall outside the initial x range`);
+  if (!movedY.length) ok("the photon y axis holds still across the steps too");
+  else fail(`the photon y axis moved at steps ${movedY.join(", ")}`);
+  if (!outsideY && peaks) ok("and its initial range is set from the strongest line of the run");
+  else fail(`${outsideY} photon lines fall outside the initial y range, ${peaks} steps reach its top`);
 
   // A zoom the reader makes, by dragging across the plot as they would. Not
   // `Plotly.relayout`: that is the page's edit, not the reader's, and it is
@@ -968,7 +992,19 @@ async function main() {
   if (zoomed.range === initial.range) fail("dragging across the photon plot did not zoom it");
   else if (after.range === zoomed.range) ok("a zoom of the photon x axis survives moving the slider");
   else fail(`the slider undid a zoom: ${after.range} against ${zoomed.range}`);
+  // And the same up the plot, which zooms the y axis alone.
+  const upright = box.x + box.w / 2;
+  await page.mouse.move(upright, box.y + box.h * 0.3);
+  await page.mouse.down();
+  await page.mouse.move(upright, box.y + box.h * 0.7, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const zoomedY = await photonAxis();
   await setPhotonStep(stepCount - 1);
+  const afterY = await photonAxis();
+  if (zoomedY.yRange === initial.yRange) fail("dragging up the photon plot did not zoom it");
+  else if (afterY.yRange === zoomedY.yRange) ok("a zoom of the photon y axis survives moving the slider");
+  else fail(`the slider undid a y zoom: ${afterY.yRange} against ${zoomedY.yRange}`);
 
   // The dose chart draws only when the vendored solver reports the field, so a
   // checkout whose vendor/ predates it skips rather than fails. Once bumped
