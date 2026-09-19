@@ -486,6 +486,30 @@ function photonEnergyRange(results, xType) {
   return [xType === "log" ? a - pad : Math.max(0, a - pad), b + pad];
 }
 
+/// The y range showing every photon line of every step that would be drawn,
+/// in the axis's own coordinates. `null` when no step has a line.
+///
+/// Each step draws the lines within five decades of its own strongest, so the
+/// envelope runs from the lowest of those floors to the highest peak: the
+/// intensities fall by decades over a cooling schedule, and an axis fixed at
+/// the first step's five decades would leave the late steps empty, while one
+/// that followed each step would rescale under the reader with every move of
+/// the slider. Fixed once from the run, it holds still, and a late step reads
+/// low on it, which is what a late step is.
+function photonIntensityRange(results, yType) {
+  let lo = Infinity;
+  let hi = 0;
+  for (const step of results) {
+    const intensities = step.photon_intensity || [];
+    if (!intensities.length) continue;
+    const peak = Math.max(...intensities);
+    if (!(peak > 0)) continue;
+    hi = Math.max(hi, peak);
+    lo = Math.min(lo, peak / 1e5);
+  }
+  return hi > 0 ? span(yType, lo, hi, 8) : null;
+}
+
 /// The decay photon spectrum is a set of discrete lines, not a curve, so it
 /// wants stems rather than a join between neighbours -- a line through them
 /// would draw continuum that is not there.
@@ -500,7 +524,8 @@ export function drawPhotons(results, stepIndex) {
   const xType = scaleOf(el.id, "x");
   const yType = scaleOf(el.id, "y");
   const xRange = photonEnergyRange(results, xType);
-  if (xRange === null) {
+  const yRange = photonIntensityRange(results, yType);
+  if (xRange === null || yRange === null) {
     // No step has a line, so there is nothing to draw and no axis to hold.
     Plotly.purge(el);
     return;
@@ -509,12 +534,13 @@ export function drawPhotons(results, stepIndex) {
   // scrolling through it should see an empty frame where the spectrum lives,
   // not a plot that vanishes and comes back somewhere else.
   const peak = energies.length ? Math.max(...intensities) : 1;
-  // Five decades down from the strongest; below that a line is not physics.
+  // Five decades down from this step's strongest; below that a line is not
+  // physics. The step's own floor decides what is drawn; the axis is the run's.
   const floor = peak / 1e5;
-  // Where a stem starts. The bottom of the visible range, which is the floor on
-  // a log axis and zero on a linear one -- starting at the floor on linear
-  // would hang every line above the axis.
-  const base = yType === "log" ? floor : 0;
+  // Where a stem starts. The bottom of the visible range, which is the run's
+  // floor on a log axis and zero on a linear one -- starting at the floor on
+  // linear would hang every line above the axis.
+  const base = yType === "log" ? 10 ** yRange[0] : 0;
 
   const x = [];
   const y = [];
@@ -552,13 +578,14 @@ export function drawPhotons(results, stepIndex) {
       // other at the origin -- which is occasionally the view someone wants of
       // the high-energy end, hence the toggle.
       //
-      // The range is the whole run's, not this step's, and `uirevision` keeps
-      // a zoom across the slider: see `photonEnergyRange` and
-      // `photonRevision`. The y axis is the step's own, since the intensities
-      // fall by decades over a cooling schedule and a fixed range would leave
-      // the late steps as stubs along the floor.
+      // Both ranges are the whole run's, not this step's, and `uirevision`
+      // keeps a zoom across the slider on each: see `photonEnergyRange`,
+      // `photonIntensityRange` and `photonRevision`. The reader moving through
+      // the steps sees the lines fall and shift on a frame that holds still,
+      // rather than a frame that rescales itself to make every step look the
+      // same.
       xaxis: { type: xType, range: xRange, uirevision: photonRevision(results, xType) },
-      yaxis: { type: yType, ...(energies.length ? { range: span(yType, floor, peak, 8) } : {}) },
+      yaxis: { type: yType, range: yRange, uirevision: photonRevision(results, yType) },
       layout: { showlegend: false, hovermode: "closest" },
     },
   ), CONFIG);

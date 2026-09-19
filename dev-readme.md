@@ -486,6 +486,16 @@ which is a true reading. The Python export ranks its six the same way.
 `verify.mjs` runs aluminium and requires the largest series at the first step
 and at the last to be named.
 
+The decay photon lines are one step at a time, under a slider, and both axes
+are fixed once per run rather than per step: the x range from every step's
+lines, the y range from the lowest floor to the strongest line over the run,
+each step drawing the lines within five decades of its own strongest. An axis
+that followed each step would rescale itself under the reader with every move
+of the slider, and make every step look the same; fixed, the lines fall and
+shift on a frame that holds still, and a late step reads low, which is what a
+late step is. A zoom the reader drags on either axis survives the slider, by
+Plotly's `uirevision`; a new run or a scale toggle draws the axis afresh.
+
 The contact dose is the odd one of the three time series: it
 is intensive, so unlike activity and decay heat it does not scale with the
 volume on the form -- the semi-infinite slab estimate cancels the geometry, and
