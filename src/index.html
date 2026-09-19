@@ -148,6 +148,10 @@
   th { color: var(--muted); font-weight: 500; font-size: .78rem; }
   td.num, th.num { text-align: right; font-family: var(--mono); }
   .schedule-table { table-layout: fixed; }
+  /* A free-text number that does not read as one, such as a half-typed flux.
+     The last good value is kept underneath; the border says the box is not
+     what the run will use. */
+  input.invalid { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
   .schedule-table td, .schedule-table th { padding-left: .25rem; padding-right: .25rem; }
   /* Tighter still on the unit, so "min" fits beside its arrow. */
   .schedule-table select { padding-left: .3rem; padding-right: 0; }

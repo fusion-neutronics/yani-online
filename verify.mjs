@@ -1050,6 +1050,25 @@ async function main() {
   else fail(`density is missing from the material key: ${denser.toExponential(4)} against ${(base * 2).toExponential(4)}`);
   await page.fill("#density", density);
 
+  // The flux. Shown in exponent form, since a number input showed 1e14 as
+  // fifteen digits in a cell with room for eight, and read back the same way.
+  // Doubling it doubles the activity to within the burn-up of the target over
+  // a year, which is a fraction of a percent at 1e14; a half-typed value is
+  // marked and the last good one kept rather than reaching the solver.
+  const rateInput = '#schedule input[data-k="rate"]';
+  eq(await page.$eval(rateInput, (el) => el.value), "1e14", "the flux reads as an exponent");
+  await page.fill(rateInput, "2e");
+  eq(await page.$eval(rateInput, (el) => el.classList.contains("invalid")), true, "a half-typed flux is marked");
+  await page.fill(rateInput, "2e14");
+  eq(await page.$eval(rateInput, (el) => el.classList.contains("invalid")), false, "and a whole one is not");
+  const brighter = await solve();
+  if (Math.abs(brighter / (base * 2) - 1) < 0.01) ok(`doubling the flux doubles the activity (${(brighter / base).toFixed(4)}x)`);
+  else fail(`doubling the flux gave ${brighter.toExponential(4)} against ${(base * 2).toExponential(4)}`);
+  await page.fill(rateInput, "1e14");
+  const dimmed = await solve();
+  if (dimmed === base) ok("and restoring it restores the answer exactly");
+  else fail(`flux round trip drifted: ${dimmed.toExponential(6)} against ${base.toExponential(6)}`);
+
   // The composition itself, on a nuclide the fixtures carry, so this does not
   // fetch either. Fe57 activates differently from Fe56; equal answers would
   // mean the second run was solved against the first one's material.
@@ -1089,6 +1108,35 @@ async function main() {
   await solve();
   if (fetched() === beforeStill) ok("a run at the same temperature refetches nothing");
   else fail(`a run at the same temperature made ${fetched() - beforeStill} requests`);
+
+  // A chain library. The chain is parsed once and held, and a change to any of
+  // its four libraries after a run used to change nothing: the dropdown moved
+  // and the old chain solved on. Now it starts the session over, so the chain
+  // and every cross section are fetched again. The fixture server answers for
+  // any library from the one fixture set, so the answer has to come back the
+  // same; what is checked is that the fetch happened, and that the budget said
+  // so before the run.
+  await page.selectOption("#data-decay", "jeff-4.0");
+  await page.waitForFunction(
+    () => document.getElementById("budget").textContent.startsWith("The chain libraries changed"),
+    null, { timeout: 5000 },
+  ).then(
+    () => ok("changing a chain library says the chain will be fetched again"),
+    () => fail(`the budget did not notice the chain change: ${"see #budget"}`),
+  );
+  const beforeChain = fetched();
+  const rechained = await solve();
+  const chainFiles = 6;
+  if (fetched() - beforeChain > chainFiles) ok(`changing a chain library refetches the chain and the cross sections (${fetched() - beforeChain} requests)`);
+  else fail(`changing a chain library made ${fetched() - beforeChain} requests`);
+  if (rechained === base) ok("and, from the same fixtures, gives the same answer");
+  else fail(`the rechained run gave ${rechained.toExponential(6)} against ${base.toExponential(6)}`);
+  await page.selectOption("#data-decay", "endf-b8.1");
+  await solve();
+  const beforeSettled = fetched();
+  await solve();
+  if (fetched() === beforeSettled) ok("and a run after that refetches nothing again");
+  else fail(`a run after the chain change made ${fetched() - beforeSettled} requests`);
 
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });
