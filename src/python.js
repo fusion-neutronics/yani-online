@@ -41,12 +41,19 @@ function list(values, indent = 4) {
 }
 
 /// The material, as the two ways the form can express one.
-function materialSource(material) {
+///
+/// The temperature goes with it, because that is where the wheel keeps it: a
+/// material's temperature is what its cross sections are read at. Written out
+/// even at the default, since the page fetched one temperature and the script
+/// should read the same one rather than the library's lowest, which is what
+/// the wheel settles on when a material names none.
+function materialSource(material, temperature) {
   if (material.kind === "pnnl") {
     return [
       `# ${material.name}, from the compendium compiled into yani.`,
       `material = yani.materials.pnnl[${str(material.name)}]`,
       `material.volume = ${num(material.volume)}  # cm^3, required for activity and decay heat`,
+      `material.temperature = ${num(temperature)}  # K, what the cross sections are read at`,
     ].join("\n");
   }
   const composition = Object.entries(material.composition)
@@ -61,6 +68,7 @@ function materialSource(material) {
     `    units=${str(material.units)},`,
     `    fraction_type=${str(material.fractionType)},`,
     `    volume=${num(material.volume)},  # cm^3, required for activity and decay heat`,
+    `    temperature=${num(temperature)},  # K, what the cross sections are read at`,
     ")",
   ].join("\n");
 }
@@ -92,7 +100,7 @@ function spectrumSource(spectrum) {
 /// `setup` is the page's own state, already resolved: no DOM, no solver, and
 /// no async, so this is testable and cannot half-write a file.
 export function pythonScript(setup) {
-  const { libraries, material, spectrum, schedule } = setup;
+  const { libraries, temperature, material, spectrum, schedule } = setup;
   const steps = schedule
     .map((s) =>
       s.kind === "pulse"
@@ -130,7 +138,7 @@ yani.transmutation_branch_ratios = ${str(libraries.branching)}
 
 # --- material -------------------------------------------------------------
 
-${materialSource(material)}
+${materialSource(material, temperature)}
 
 # --- neutron spectrum -----------------------------------------------------
 

@@ -37,16 +37,16 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.38 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 3.79 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 2.81 MB |
+| wasm (base64) | 3.20 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
-| page and application code | 0.12 MB |
+| page and application code | 0.14 MB |
 
 `plotly-basic` rather than the full bundle: every chart here is scatter or bar,
 which the basic distribution covers at a quarter of the size. It is gzipped
@@ -55,19 +55,27 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces around 2.5 MB where core's CI produces
-2.11 MB.
+so a local `wasm-pack build` produces more than core's CI does (2.40 MB for
+yani-core-0.17.0, against 2.11 MB for 0.11.0; the solver grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
-re-vendoring means downloading an asset rather than reproducing a toolchain:
+re-vendoring means downloading an asset rather than reproducing a toolchain. Core
+now tags one release for both of its cores, so the tag carries both names:
 
 ```bash
-gh release download yani-core-0.11.0 -R fusion-neutronics/core \
+gh release download 'yani-core-0.17.0,yamc-core-0.12.0' -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 yani-core-0.11.0 > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yani-core-0.17.0,yamc-core-0.12.0' > vendor/CORE_COMMIT`.
+
+The solver and the data move together. yani-core-0.17.0 reads `format_version`
+2, the 2026-09-18 republish that moved the union energy grids out of
+`nuclide.arrow` into their own `energy.arrow` (fusion-neutronics/core#100 and
+#109), and refuses a folder at version 1 rather than reading it with no grids;
+the release before it read version 1 and cannot read 2. The origin serves 2 for
+every library, so a page vendoring an older solver would fail every load.
 
 ## Iterating without a build
 
@@ -137,71 +145,116 @@ Fetched from `yamc-data.xsplot.com` on demand. Which nuclides are needed is
 knowable before any of them are fetched, so the page reports the download budget
 up front rather than showing an open-ended spinner.
 
-### Fetching MTs rather than files
+### Fetching one temperature of the MTs a run reads, rather than files
 
 `version.json` is fetched first for every nuclide, and the rest of that
 nuclide's fetch is decided by what it says. Two things follow from that order.
 
-The first works today. A library publishes far fewer nuclides than the chain
+The first is the 404s. A library can publish fewer nuclides than the chain
 names, and an unpublished one used to 404 three times, once per file; now it
-404s on `version.json` and the other two requests are never issued. Measured
-against the SFR chain fixture with an Fe material, 446 of the 461 nuclides in
-the closure are unpublished, and the run goes from 1383 nuclide-data requests to
-491.
+404s on `version.json` and nothing else is asked for it. Against the SFR chain
+fixture with an Fe56 material, 441 of the 462 nuclides in the closure are not in
+the fixture set, and the run makes 656 nuclide-data requests where three per
+nuclide would be 1386. Against the origin itself it buys nothing on ENDF/B-8.1,
+which publishes every one of the 462; it is there for the libraries with gaps.
 
-The second is live as of yani-core-0.11.0. Each `version.json` carries
-`reaction_ranges`, the byte range of every record batch inside
-`reactions.arrow`, keyed by MT and then by temperature (core's
-`index_reactions` writes it; since fusion-neutronics/core#100 the file is
-written one batch per (MT, temperature), so one temperature of one reaction is
-its own range). That two-level shape is what this build plans from, and the
-published data still carries the one-level shape it replaces, so until every
-`version.json` on the origin has been reindexed the page reads them as no index
-and falls back to whole-file GETs. An activation run reads the handful of channels its chain names
-and none of the full-grid transport MTs, which are most of the file, so the page
-plans a set of HTTP range requests instead of one whole-file GET, coalescing
-ranges less than 16 kB apart, and splices `schema ++ batches ++ EOS` into an
-Arrow IPC stream.
+The second is the indexes. Each `version.json` carries two: `reaction_ranges`,
+the byte range of every record batch inside `reactions.arrow`, keyed by MT and
+then by temperature, since the file is written one batch per (MT, temperature);
+and `energy_ranges`, the byte range of each temperature's union energy grid
+inside `energy.arrow`, which is written one batch per temperature. An activation
+run reads the handful of channels its chain names, at the one temperature the
+material is at, and none of the full-grid transport MTs or the other
+temperatures, which together are nearly all of both files. So the page plans,
+per nuclide, the wanted MTs at one temperature and that temperature's grid as
+HTTP range requests, coalescing ranges less than 16 kB apart, and splices each
+file's `schema ++ batches ++ EOS` into an Arrow IPC stream. The solver reads
+either framing: `read_arrow_file` sniffs the `ARROW1` magic. The MT set comes
+from `requiredMts` on the session, feature-detected at boot, so the page carries
+no copy of the chain kind to MT table.
 
-It was gated off until this release, because nothing could read what it produces:
-everything the solver loads goes through `read_arrow_file`, which was
-`FileReader`, and an IPC stream has no footer for it to find. It now sniffs the
-`ARROW1` magic and reads either framing. The gate is `requiredMts` on the
-session, feature-detected at boot rather than read off `vendor/CORE_COMMIT`: a
-commit says which build this is, not what it can do, and the page has to choose
-how to fetch before it has fetched anything. That method is also where the MT set
-comes from, so the page carries no copy of the chain kind to MT table. Both
-halves are core#527, and re-vendoring a solver that has them turned this on with
-no change here.
+Which temperature is the **Temperature** field under the cross-section library,
+294 K by default. Per nuclide the page takes the published label nearest it,
+chosen among the labels that carry a batch of a wanted MT and a grid: the index
+also lists a 0 K label, which on ENDF/B-8.1 carries elastic scattering and
+nothing else, and a run fetched at it would splice a stream with every wanted
+channel absent, which the solver reads as a nuclide that reacts at zero. Every
+library on the origin publishes the same seven labels for every nuclide checked
+(0, 250, 294, 600, 900, 1200 and 2500 K), so the nearest is the one asked for
+unless something else is typed.
 
-Measured end to end by `node verify.mjs`, on the SFR chain fixture with an Fe
-material: **13.6 MB across 47 requests where the whole files are 114.3 MB**, 8.4x
-less over 16 nuclides at 2.9 requests each, and the answer is identical --
+The solver is not told the temperature; the wasm material has none. It reads
+the spliced stream, finds one temperature carrying reactions, and settles on it.
+That is the same rule it applies to a whole file with every temperature in it,
+where it settles on the *lowest*, 250 K on ENDF/B-8.1, and it is also what the
+`yani` wheel does for a material that names no temperature. So the page used to
+answer at 250 K without saying so and now answers at 294 K by default, and the
+Python export writes the temperature onto the material so the wheel reads the
+same one (exactly when the label is published, as a blend of the bracketing
+pair otherwise, where the page takes the nearest). On the Fe56 check the two
+temperatures differ in the tenth significant digit of the peak activity,
+4.4382587336e14 Bq at 250 K against 4.4382587341e14 at 294 K.
+
+Changing the temperature, or the cross-section library, after a run invalidates
+every held nuclide and rebuilds the material, because the solver keeps the
+decoded cross sections on the material it was handed and a rebuilt one is
+empty. `verify.mjs` checks the round trip: a run at 600 K fetches again and
+gives a different answer, a run back at 294 K fetches again and gives the
+original exactly, and a run that changes neither fetches nothing.
+
+Measured against the origin with the built page, on an Fe56 material against
+ENDF/B-8.1, whose closure is 462 nuclides, all published:
+
+| | requests | transferred | first run |
+| --- | ---: | ---: | ---: |
+| whole files, no index | 1392 | 3.9 GB (by the indexes) | not measured |
+| every temperature of the wanted MTs, grids whole | 2774 | 662 MB | 73 s |
+| one temperature of the wanted MTs, one grid | 5019 | 156 MB | 21 s |
+
+The last two are the page before and after this change. Of the 156 MB, the
+reactions are 100 MB in 3304 range requests (seven per nuclide: the wanted
+batches of one MT are now separated from the next MT's by its other five
+temperatures, where before they touched), the grids 32 MB in 785, `version.json`
+13 MB in 462 and `nuclide.arrow` 1.4 MB in 462. The requests are why
+`XS_CONCURRENCY` in app.js is 48 rather than the dozen the chain fetch uses: the
+same run takes 38 s with 12 in flight, 26 s with 24 and 21 s with 48, and no
+less beyond that. A range request costs its round trip, not its bytes.
+
+Measured end to end by `node verify.mjs`, on the SFR chain fixture with an Fe56
+material: **4.9 MB across 173 range requests where the whole files are
+177.5 MB**, over 21 nuclides and both files, and the answer is
 4.4380e14 Bq peak activity and 2.711e4 Gy/h peak contact dose, the same digits
-the whole-file path gives.
+the whole-file path gives at that temperature. The same setup through the wheel
+at 294 K gives 4.43825873407959e14 Bq against the page's 4.43825873407960e14,
+which is the last bit.
 
-A nuclide that publishes *none* of the wanted MTs plans nothing but the schema,
-and that plan is kept rather than dropped: the solver reads a
+A nuclide that publishes *none* of the wanted MTs plans nothing but the reaction
+schema, and that plan is kept rather than dropped: the solver reads a
 schema-and-nothing-after-it stream as the empty subset it is, which is the same
 zero reactions the whole file would have given once the MT filter ran. He4 is the
-real case, in endf-b8.1 and jendl-5.0 alike. So the nuclides with nothing to give
-are the ones the index saves the most on -- all of the file rather than most of
-it.
+real case, in endf-b8.1 and jendl-5.0 alike. Its grid is still fetched, one of
+them, because the loader requires `energy.arrow` for any nuclide whose
+`nuclide.arrow` lists temperatures. So the nuclides with nothing to give are the
+ones the index saves the most on -- all of the reactions file rather than most of
+it: `node verify.mjs --live He4` reads 712 bytes of a 0.23 MB file.
 
-The fixture set carries no such nuclide, so that case was confirmed once against
-the vendored binary directly, driving `YaniSession` from Node with Fe56's
-published bytes: a 712-byte schema-only splice in place of the 31 MB file loads
-without error and transmutes to zero activity over zero nuclides, where the same
-splice taken over the MTs the chain does name is 3.81 MB and gives 5.51e14 Bq
-over three. Zero is the answer a nuclide with no activation channel should give;
-what mattered was that it is an answer rather than a thrown error taking the run
-with it.
+That case was confirmed once against the vendored binary directly, driving
+`YaniSession` from Node with Fe56's published bytes: a 712-byte schema-only
+splice in place of the 31 MB file loads without error and transmutes to zero
+activity over zero nuclides, where the same splice taken over the MTs the chain
+does name is 3.81 MB and gives 5.51e14 Bq over three. Zero is the answer a
+nuclide with no activation channel should give; what mattered was that it is an
+answer rather than a thrown error taking the run with it.
 
 The whole-file path stays as the fallback, for a solver too old to say which MTs
-it needs and for a range answered `200` rather than `206`, which is treated as a
-stripped `Range` header and the body used as the whole file. That is the right
-answer through a proxy that does not pass ranges through, and once one request
-comes back that way the page stops asking for ranges for the rest of the session.
+it needs, for a `version.json` with no reaction index, and for a range answered
+`200` rather than `206`, which is treated as a stripped `Range` header and the
+body used as the whole file. That is the right answer through a proxy that does
+not pass ranges through, and once one request comes back that way the page stops
+asking for ranges for the rest of the session. A reaction index without a grid
+index narrows the reactions and fetches the grids whole; a grid index without a
+reaction index narrows nothing, because the solver would settle on the lowest
+temperature in the whole reactions file and need that temperature's grid.
 
 ### Checking it
 
@@ -217,10 +270,11 @@ that never arrived read as a complete set and reached the splice, which threw an
 took the whole run down instead of reporting one nuclide.
 
 `node verify.mjs --live` checks the part no synthetic fixture can, against the
-real origin: that the published index describes the published object, that ranges
-come back 206 with exactly the bytes asked for, and that a spliced stream is
-byte-for-byte the whole file's bytes at those offsets. Opt-in, because it is the
-only part that needs the network.
+real origin: that the published indexes describe the published objects, that
+ranges come back 206 with exactly the bytes asked for, and that a stream spliced
+at 294 K is byte-for-byte the whole file's bytes at those offsets, for the
+reactions and for the grids. Opt-in, because it is the only part that needs the
+network.
 
 Byte-exactness is what that asserts, since nothing in this repository decodes
 Arrow. That a byte-exact splice of these ranges *decodes* correctly was confirmed
@@ -232,22 +286,25 @@ code, so it is recorded here rather than re-run.
 
 Worth knowing for anyone tuning the 16 kB threshold: on every ENDF/B-8.1 nuclide
 checked, coalescing merges only ranges that already touch and swallows no
-unwanted MT at all, because the writer puts the activation MTs in contiguous
-runs. Every nuclide comes out at three requests whether five MTs are wanted or
-sixteen. So the threshold is free today, and the drop-the-swallowed-batch path
-exists for a layout that does not hold: it is reachable only from the synthetic
-fixture, which is why that fixture builds the case.
+unwanted batch at all. At one temperature there is little left to merge: the
+writer lays one MT's temperatures back to back, so the wanted batch of one MT
+and the wanted batch of the next are separated by five batches nobody asked
+for, and a nuclide comes out at about seven reaction requests and two grid
+requests rather than the three it took when every temperature was wanted.
+Raising the threshold buys requests back at the price of bytes: 256 kB would
+halve the requests and double the bytes, and 1 MB would fetch every temperature
+again. The drop-the-swallowed-batch path exists for a layout that does not
+hold: it is reachable only from the synthetic fixture, which is why that fixture
+builds the case.
 
-The fixtures carry an index themselves -- core's
-`scripts/fetch_test_fixtures.py` downloads the published `version.json`, and the
-published one has `reaction_ranges` in it -- but until the origin is reindexed
-that is the one-level shape from before fusion-neutronics/core#100, which this
-build reads as no index. So does a tree old enough to predate the index. Either
-way `cargo run --release -p yamc-convert --bin index_reactions -- <fixture dir>`
-in a core at or after that change rewrites the fixtures' `version.json` in the
-two-level shape, and the browser run then exercises the ranged path end to end;
-without it `verify.mjs` prints the skip line and the page fetches whole objects.
-The fixture server in `verify.mjs` honours `Range` and answers 206 either way.
+The fixtures are the published objects, so they carry both indexes: core's
+`scripts/fetch_test_fixtures.py` downloads each nuclide's `version.json`,
+`nuclide.arrow`, `energy.arrow` and `reactions.arrow` as the origin serves them,
+into `~/.cache/yamc` with symlinks under `crates/yamc/tests`. A cache from
+before the 2026-09-18 republish is `format_version` 1, which the vendored
+solver refuses ("Unsupported Arrow format version"); the script re-fetches a
+cache whose `data_version` no longer matches, so re-running it is the fix. The
+fixture server in `verify.mjs` honours `Range` and answers 206.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default
@@ -304,15 +361,17 @@ by anything either change touches.
 
 These are smaller than they would have been before the fixtures carried
 `reaction_ranges`. The byte-range fetch means only the activation MTs are
-fetched and decoded, 13.6 MB against 114.3 MB, so there is far less decode left
-for keeping the material to save. The first solve fell from about 1.3 s to about
-0.6 s when the fixtures gained the index, which is the byte-range work rather
-than anything here.
+fetched and decoded, at one temperature 4.9 MB against 177.5 MB, so there is
+far less decode left for keeping the material to save. The first solve fell
+from about 1.3 s to about 0.6 s when the fixtures gained the index, which is the
+byte-range work rather than anything here, and stays there on yani-core-0.17.0
+at one temperature: 598 ms first, then 80, 73 and 61 ms.
 
-The fixtures still understate the reuse. They carry 16 indexed nuclides where a
-real closure is 461 at roughly 508 MB of activation-scoped Arrow, and core
-measured the decode at 1.8 s of a 2.3 s call on a ~430-nuclide steel. The bigger
-the closure, the more of a repeat solve is decode, and the more this removes.
+The fixtures still understate the reuse. They carry 21 indexed nuclides where a
+real closure is 462, and core measured the decode at 1.8 s of a 2.3 s call on a
+~430-nuclide steel. The bigger the closure, the more of a repeat solve is
+decode, and the more this removes. Against the origin the first solve is the
+fetch: 21 s of the Fe56 run above, against a solve under a second.
 
 Two things that do *not* arrive with a newer solver, and are worth knowing
 before reading core's benchmark table as a promise:
@@ -366,14 +425,17 @@ mean nothing. (`VITAMIN-J-42` was offered here until the release, and is one of
 the two.)
 
 A full run has been verified in Chromium from `file://` against real
-ENDF/B-VIII.1 data -- chain load, ranged cross-section fetch, solve and all five
-result plots, with a Fe56 material and the 446 unpublished nuclides of its
-closure answered as 404s: 4.4380e14 Bq peak activity, and 2.711e4 Gy/h peak
-contact dose. The same setup run through the `yani` Python package agrees to
-2.1e-10 -- which is how the composition bug above was found. Firefox and WebKit
-last ran the page end to end on the solver vendored before yani-core-0.11.0,
-where all three engines agreed to the last digit; only Chromium is installed
-here, so that is what this release was checked against.
+ENDF/B-VIII.1 data -- chain load, ranged fetch of one temperature of the cross
+sections and their grid, solve and all five result plots, with a Fe56 material
+whose closure of 462 nuclides the origin publishes in full: 4.4380e14 Bq peak
+activity, and 2.711e4 Gy/h peak contact dose. The same setup run through the
+`yani` Python package at 294 K agrees to the last bit, and at the wheel's own
+default, which is the lowest published temperature, reproduces to the last bit
+what the page answered before it fetched one temperature. (An earlier version of
+this check agreed to 2.1e-10, which is how the composition bug above was found.)
+Firefox and WebKit last ran the page end to end on the solver vendored before
+yani-core-0.11.0, where all three engines agreed to the last digit; only
+Chromium is installed here, so that is what this release was checked against.
 
 `node verify.mjs` is that check; it needs a local copy of the data
 (`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without

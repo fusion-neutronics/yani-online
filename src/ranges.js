@@ -1,15 +1,21 @@
-// Fetching only the MTs a run reads, out of a `reactions.arrow` that holds
-// every MT.
+// Fetching only the bytes a run reads out of a nuclide's published objects.
 //
-// The published file is written one Arrow record batch per (MT, temperature),
-// so every cross section is already a contiguous byte range in the object, and
-// each nuclide's `version.json` names those ranges (`reaction_ranges`, added by
-// core's `index_reactions`, keyed by MT and then by temperature). An activation
-// run reads the handful of channels its chain names and none of the full-grid
-// transport MTs, which are most of the file: measured over 68 ENDF/B-8.1
-// nuclides, the MTs `REACTION_MT_MAP` can name are 109 MB of 948 MB, so this is
-// 8.7x less to download for the same answer. A plotter can go further and read
-// one channel at the one temperature it draws.
+// Two files carry almost all of a nuclide's activation data, and both are
+// written one Arrow record batch per unit a reader might want on its own:
+//
+//   reactions.arrow   one batch per (MT, temperature)
+//   energy.arrow      one batch per temperature, holding the union energy grid
+//                     every cross section at that temperature is tabulated on
+//
+// Each nuclide's `version.json` names where every batch sits (`reaction_ranges`
+// keyed by MT and then by temperature, `energy_ranges` keyed by temperature;
+// both written by core's converter since fusion-neutronics/core#100 and #109).
+// An activation run reads the handful of channels its chain names, at the one
+// temperature the material is at, and none of the full-grid transport MTs or
+// the other five or six temperatures, which together are nearly all of every
+// file. Measured over the 462-nuclide closure of an Fe56 material on
+// ENDF/B-8.1, the whole objects are 3.9 GB, every temperature of the wanted
+// MTs is 640 MB, and one temperature of them is 133 MB.
 //
 // The index rides in a file the page already fetches, so reading it costs no
 // extra request. What it buys is spent as HTTP range requests, which the origin
@@ -27,15 +33,27 @@ const EOS = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
 /// Merge two wanted ranges into one request when the gap between them is under
 /// this.
 ///
-/// The wanted MTs come out in runs -- (n,p), (n,d), (n,t), (n,3He), (n,a) sit
-/// together in the file, since the writer follows ENDF order -- so most of the
-/// merging is of ranges that are already touching. At 16 kB the sample above
-/// coalesces 10.4 requests per nuclide down to 3.0 while downloading no
-/// measurably extra bytes, which is the whole reason for a threshold rather
-/// than exact ranges: 1400 nuclides at ten requests each is 14000 requests.
+/// The writer lays one MT's temperatures back to back and the MTs in ENDF
+/// order, so at every temperature the wanted batches of one MT sit together and
+/// the next wanted MT's follow a few batches later. At 16 kB the merge takes
+/// touching batches and nothing else: on ENDF/B-8.1 it swallows no unwanted
+/// batch on any nuclide checked, so every byte fetched is a byte the run reads,
+/// and the drop-the-swallowed-batch path in `spliceStream` exists for a layout
+/// that does not hold. Fetching one temperature costs more requests than
+/// fetching them all, since the other temperatures of an MT now separate the
+/// wanted batches: seven per nuclide rather than three, against six times
+/// fewer bytes.
 export const COALESCE_GAP = 16 * 1024;
 
-/// Read the byte-range index out of a nuclide's parsed `version.json`.
+/// `[off, len]` as `version.json` spells a range, or `null` for anything else.
+function range(value) {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const [off, len] = value;
+  if (!Number.isInteger(off) || !Number.isInteger(len) || off < 0 || len < 0) return null;
+  return { off, len };
+}
+
+/// Read the reaction byte-range index out of a nuclide's parsed `version.json`.
 ///
 /// `mts` maps each MT to a map of temperature label (`"294K"`, as the file
 /// spells it) to the range of the record batch carrying that cross section
@@ -50,7 +68,9 @@ export const COALESCE_GAP = 16 * 1024;
 /// answer rather than an error.
 export function reactionRanges(version) {
   const index = version && version.reaction_ranges;
-  if (!index || !Array.isArray(index.schema) || !index.mts) return null;
+  if (!index || !index.mts) return null;
+  const schema = range(index.schema);
+  if (!schema) return null;
   const mts = new Map();
   for (const [mt, byTemperature] of Object.entries(index.mts)) {
     // One entry in the shape from before the split makes the whole index
@@ -60,20 +80,93 @@ export function reactionRanges(version) {
     // same input, and both fall back to fetching the whole file.
     if (!byTemperature || typeof byTemperature !== "object" || Array.isArray(byTemperature)) return null;
     const temperatures = new Map();
-    for (const [temperature, range] of Object.entries(byTemperature)) {
-      if (!Array.isArray(range)) return null;
-      temperatures.set(temperature, { off: range[0], len: range[1] });
+    for (const [temperature, value] of Object.entries(byTemperature)) {
+      const r = range(value);
+      if (!r) return null;
+      temperatures.set(temperature, r);
     }
     if (temperatures.size) mts.set(Number(mt), temperatures);
   }
   if (!mts.size) return null;
-  return { schema: { off: index.schema[0], len: index.schema[1] }, mts };
+  return { schema, mts };
+}
+
+/// Read the energy-grid byte-range index out of a nuclide's parsed
+/// `version.json`.
+///
+/// `temperatures` maps each label the section holds to the range of the batch
+/// carrying that temperature's union grid (fusion-neutronics/core#109). It can
+/// name a grid no reaction is tabulated at: the NJOY route publishes a 0 K grid
+/// that way, and core's `EnergyRanges` keeps it for the same reason this does,
+/// so that an index describes the whole object.
+///
+/// `null` when there is no index, which is what data published between the
+/// grids moving into their own object and that object being indexed looks
+/// like. Callers fetch the whole file then, which carries every grid.
+export function energyRanges(version) {
+  const index = version && version.energy_ranges;
+  if (!index || !index.temperatures || typeof index.temperatures !== "object") return null;
+  const schema = range(index.schema);
+  if (!schema) return null;
+  const temperatures = new Map();
+  for (const [temperature, value] of Object.entries(index.temperatures)) {
+    const r = range(value);
+    if (!r) return null;
+    temperatures.set(temperature, r);
+  }
+  if (!temperatures.size) return null;
+  return { schema, temperatures };
+}
+
+/// Kelvin from a label as the files spell one, `"294K"` or `"293.6K"`. `NaN`
+/// for anything that is not a number with an optional trailing K.
+export function kelvin(label) {
+  const m = /^\s*([0-9]+(?:\.[0-9]+)?)\s*K?\s*$/i.exec(label);
+  return m ? Number(m[1]) : NaN;
+}
+
+/// The temperature labels at which this nuclide publishes a batch of at least
+/// one of `wantedMts`.
+///
+/// Drawn from the wanted MTs rather than from every MT in the index, because
+/// the index lists labels no activation channel is tabulated at: ENDF/B-8.1
+/// carries elastic scattering at 0 K and nothing else there. A run fetched at
+/// that label would splice a stream with the wanted channels absent, which the
+/// solver reads as a nuclide that reacts at zero, without saying so.
+export function publishedTemperatures(ranges, wantedMts) {
+  const labels = new Set();
+  for (const [mt, byTemperature] of ranges.mts) {
+    if (!wantedMts.has(mt)) continue;
+    for (const temperature of byTemperature.keys()) labels.add(temperature);
+  }
+  return labels;
+}
+
+/// The label among `labels` nearest to `wantedKelvin`, or `null` for none.
+///
+/// Nearest in Kelvin, with a tie going to the lower temperature: less Doppler
+/// broadening is the smaller departure from an unbroadened evaluation. A label
+/// that does not read as a temperature is never chosen.
+export function nearestTemperature(labels, wantedKelvin) {
+  let best = null;
+  let bestKelvin = NaN;
+  for (const label of labels) {
+    const k = kelvin(label);
+    if (Number.isNaN(k)) continue;
+    const closer = best === null
+      || Math.abs(k - wantedKelvin) < Math.abs(bestKelvin - wantedKelvin)
+      || (Math.abs(k - wantedKelvin) === Math.abs(bestKelvin - wantedKelvin) && k < bestKelvin);
+    if (closer) {
+      best = label;
+      bestKelvin = k;
+    }
+  }
+  return best;
 }
 
 /// The messages a run needs: the schema, then the record batch of every wanted
 /// MT this nuclide actually publishes, at every temperature, or at the
-/// temperatures `wantedTemperatures` names when it is given (the plotter draws
-/// one).
+/// temperatures `wantedTemperatures` names when it is given.
 ///
 /// In file order rather than MT order, and MT order is not file order. A
 /// decoder does not care -- record batch messages are self-contained -- but the
@@ -124,24 +217,93 @@ export function coalesce(parts, gap = COALESCE_GAP) {
   return spans;
 }
 
-/// What to request for one nuclide, and what it will cost.
+/// A plan out of its parts: what to request, and what it costs against the
+/// whole object.
 ///
 /// `bytes` is the transfer, which is the coalesced total and so is at or above
 /// the sum of the parts. `full` is the whole file for comparison, taken as the
-/// end of the last batch: the index describes every message in the object, so
-/// the only thing past its end is the Arrow footer.
+/// end of the last batch the index describes: the index covers every message in
+/// the object, so the only thing past its end is the Arrow footer.
+function plan(parts, spans, full) {
+  return { parts, spans, bytes: spans.reduce((n, s) => n + s.len, 0), full };
+}
+
+/// What to request from `reactions.arrow` for one nuclide, and what it will
+/// cost.
 export function planFetch(ranges, wantedMts, gap = COALESCE_GAP, wantedTemperatures = null) {
   const parts = wantedParts(ranges, wantedMts, wantedTemperatures);
-  const spans = coalesce(parts, gap);
   let full = 0;
   for (const byTemperature of ranges.mts.values()) {
     for (const { off, len } of byTemperature.values()) full = Math.max(full, off + len);
   }
+  return plan(parts, coalesce(parts, gap), full);
+}
+
+/// What to request from `energy.arrow` for one nuclide: the schema and the
+/// grid of every label in `wantedTemperatures` this nuclide publishes.
+///
+/// A label the nuclide has no grid for is simply absent, as with an MT. Two
+/// requests is the usual answer: the schema is a few hundred bytes at the front
+/// of the file, and the one grid wanted is generally not the first one behind
+/// it.
+export function planEnergyFetch(ranges, wantedTemperatures, gap = COALESCE_GAP) {
+  const batches = [];
+  let full = 0;
+  for (const [temperature, range] of ranges.temperatures) {
+    full = Math.max(full, range.off + range.len);
+    if (wantedTemperatures.has(temperature)) batches.push(range);
+  }
+  batches.sort((a, b) => a.off - b.off);
+  const parts = [ranges.schema, ...batches];
+  return plan(parts, coalesce(parts, gap), full);
+}
+
+/// Everything the fetch of one nuclide is decided by, from its `version.json`.
+///
+/// Returns the temperature label chosen and a plan per ranged file, or `null`
+/// in place of a plan for a file to fetch whole:
+///
+///   - No reaction index: both files whole. The energy index alone is not
+///     enough to narrow on, because the solver then reads every temperature's
+///     reactions and settles on the lowest of them, and a grid fetched for a
+///     different label would leave that temperature interpolating against
+///     nothing. Whole files carry every grid and every temperature, and the
+///     solver's own default applies, as it did before the index existed.
+///   - A reaction index: the wanted MTs at the one published temperature
+///     nearest `wantedKelvin`, chosen among the labels that carry a wanted MT
+///     and, when there is an energy index, a grid. The grid at that label is
+///     fetched from `energy.arrow`, or the whole file when it has no index.
+///   - A nuclide publishing none of the wanted MTs (He4 is the real case,
+///     carrying elastic and the transport lookups and no activation channel)
+///     plans the reaction schema and nothing after it, which the solver reads
+///     as the empty subset it is, and one grid, nearest `wantedKelvin` among
+///     those published, because the loader requires the section to be there
+///     for a nuclide whose `nuclide.arrow` lists temperatures.
+///
+/// A plan that would fetch no less than the whole file is returned as `null`:
+/// the whole file asked for plainly is one request rather than one plus a
+/// splice.
+export function planNuclide(version, wantedMts, wantedKelvin, gap = COALESCE_GAP) {
+  const reactions = reactionRanges(version);
+  const energy = energyRanges(version);
+  if (!reactions) return { temperature: null, reactions: null, energy: null };
+
+  let labels = publishedTemperatures(reactions, wantedMts);
+  if (energy) {
+    if (labels.size) {
+      labels = new Set([...labels].filter((label) => energy.temperatures.has(label)));
+    } else {
+      labels = new Set(energy.temperatures.keys());
+    }
+  }
+  const temperature = nearestTemperature(labels, wantedKelvin);
+  const wanted = new Set(temperature === null ? [] : [temperature]);
+
+  const narrow = (p) => (p.bytes < p.full ? p : null);
   return {
-    parts,
-    spans,
-    bytes: spans.reduce((n, s) => n + s.len, 0),
-    full,
+    temperature,
+    reactions: narrow(planFetch(reactions, wantedMts, gap, wanted)),
+    energy: energy ? narrow(planEnergyFetch(energy, wanted, gap)) : null,
   };
 }
 
@@ -165,9 +327,9 @@ export function spliceStream(parts, spans, bodies) {
   const out = new Uint8Array(total);
   let at = 0;
   for (const part of parts) {
-    // Both lists are offset-sorted and short (three spans and ten parts is
-    // typical), so a scan is cheaper than an index and there is nothing to keep
-    // in step.
+    // Both lists are offset-sorted and short (a handful of spans and a dozen
+    // parts is typical), so a scan is cheaper than an index and there is
+    // nothing to keep in step.
     const i = spans.findIndex((s) => part.off >= s.off && part.off + part.len <= s.off + s.len);
     if (i < 0) {
       throw new Error(`no fetched span covers ${part.off}+${part.len}`);
@@ -199,12 +361,14 @@ export function spliceStream(parts, spans, bodies) {
 /// Nothing in it fetches or touches the page, so it can be checked directly.
 ///
 /// `jobs` and `bytes` are positionally aligned, the way `fetchAll` returns them,
-/// and `jobs[i].status` is what the origin answered. Arrival order does not
-/// matter: spans are filed by the `spanIndex` their plan gave them, not by when
-/// they landed.
+/// and `jobs[i].status` is what the origin answered. `plans` maps a nuclide to
+/// a map of file name to the plan its ranged jobs were issued from, so one
+/// nuclide can have both its grid and its reactions arriving in pieces. Arrival
+/// order does not matter: spans are filed by the `spanIndex` their plan gave
+/// them, not by when they landed.
 ///
 /// Returns the items to hand over, the nuclides something was missing for, the
-/// bytes the index saved, and whether any ranged request came back as a whole
+/// bytes the indexes saved, and whether any ranged request came back as a whole
 /// object, which is the caller's cue to stop asking for ranges.
 export function assembleNuclideData(jobs, bytes, plans) {
   const items = [];
@@ -212,6 +376,7 @@ export function assembleNuclideData(jobs, bytes, plans) {
   const bodies = new Map();
   const unranged = new Map();
   let stripped = false;
+  const key = (nuclide, file) => `${nuclide}/${file}`;
 
   for (const [i, job] of jobs.entries()) {
     if (!bytes[i]) {
@@ -220,38 +385,40 @@ export function assembleNuclideData(jobs, bytes, plans) {
       items.push({ nuclide: job.nuclide, file: job.file, bytes: bytes[i] });
     } else if (job.status !== 206) {
       // Something between the page and the bucket dropped the Range header and
-      // answered with the whole object, so what is in hand *is* reactions.arrow.
-      // Take it as the file: more bytes than were wanted, and still the right
-      // answer.
-      unranged.set(job.nuclide, bytes[i]);
+      // answered with the whole object, so what is in hand *is* the file. Take
+      // it as such: more bytes than were wanted, and still the right answer.
+      unranged.set(key(job.nuclide, job.file), bytes[i]);
       stripped = true;
     } else {
-      if (!bodies.has(job.nuclide)) {
+      const k = key(job.nuclide, job.file);
+      if (!bodies.has(k)) {
         // Filled, not just sized. A bare `new Array(n)` is sparse, and `every`
         // skips holes rather than reporting them, so a span that never arrived
         // read as a complete set and reached the splice, which threw and took
         // the whole run with it instead of reporting one nuclide.
-        bodies.set(job.nuclide, new Array(plans.get(job.nuclide).spans.length).fill(null));
+        const n = plans.get(job.nuclide).get(job.file).spans.length;
+        bodies.set(k, new Array(n).fill(null));
       }
-      bodies.get(job.nuclide)[job.spanIndex] = bytes[i];
+      bodies.get(k)[job.spanIndex] = bytes[i];
     }
   }
 
   let saved = 0;
-  for (const [nuclide, plan] of plans) {
-    const got = bodies.get(nuclide);
-    if (unranged.has(nuclide)) {
-      items.push({ nuclide, file: "reactions.arrow", bytes: unranged.get(nuclide) });
-    } else if (got && got.every(Boolean)) {
-      items.push({
-        nuclide, file: "reactions.arrow",
-        bytes: spliceStream(plan.parts, plan.spans, got),
-      });
-      saved += plan.full - plan.bytes;
-    } else {
-      // A stream short a batch is a nuclide short a reaction channel, which
-      // reacts at zero without saying so.
-      missing.add(nuclide);
+  for (const [nuclide, byFile] of plans) {
+    for (const [file, plan] of byFile) {
+      const k = key(nuclide, file);
+      const got = bodies.get(k);
+      if (unranged.has(k)) {
+        items.push({ nuclide, file, bytes: unranged.get(k) });
+      } else if (got && got.every(Boolean)) {
+        items.push({ nuclide, file, bytes: spliceStream(plan.parts, plan.spans, got) });
+        saved += plan.full - plan.bytes;
+      } else {
+        // A stream short a batch is a nuclide short a reaction channel, or
+        // short the grid its channels are tabulated on, and either reacts at
+        // zero without saying so.
+        missing.add(nuclide);
+      }
     }
   }
 

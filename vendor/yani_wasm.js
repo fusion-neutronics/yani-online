@@ -39,8 +39,12 @@ export class YaniSession {
     /**
      * Hand over one section of a nuclide's cross-section data and register it.
      *
-     * `file` is `nuclide.arrow`, `reactions.arrow` or `version.json`, matching
-     * `NEUTRON_XS_ONLY_SECTIONS`. The bytes land at `/{nuclide}.arrow/{file}`
+     * `file` is `nuclide.arrow`, `energy.arrow`, `reactions.arrow` or
+     * `version.json`, matching `NEUTRON_XS_ONLY_SECTIONS`. `energy.arrow`
+     * carries the union energy grids, which moved out of `nuclide.arrow` in
+     * fusion-neutronics/core#100; a host that does not upload it gets a load
+     * error naming it, not a silent answer. The bytes land at
+     * `/{nuclide}.arrow/{file}`
      * in the virtual filesystem and the nuclear-data config is pointed at that
      * directory, which is what `transmute` resolves against.
      * @param {string} nuclide
@@ -371,10 +375,10 @@ export function wasm_start() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg___wbindgen_throw_ea4887a5f8f9a9db: function(arg0, arg1) {
+        __wbg___wbindgen_throw_5d9e815e6fdf150f: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_error_a6fa202b58aa1cd3: function(arg0, arg1) {
+        __wbg_error_757e9472f8410341: function(arg0, arg1) {
             let deferred0_0;
             let deferred0_1;
             try {
@@ -396,7 +400,7 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+        __wbindgen_generic_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;
@@ -533,11 +537,15 @@ function __wbg_finalize_init(instance, module) {
 
 async function __wbg_load(module, imports) {
     if (typeof Response === 'function' && module instanceof Response) {
+        if (!module.ok) {
+            throw new Error(`failed to fetch Wasm: ${module.status} ${module.statusText} fetching '${module.url}'`);
+        }
+
         if (typeof WebAssembly.instantiateStreaming === 'function') {
             try {
                 return await WebAssembly.instantiateStreaming(module, imports);
             } catch (e) {
-                const validResponse = module.ok && expectedResponseType(module.type);
+                const validResponse = expectedResponseType(module.type);
 
                 if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
                     console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);

@@ -12,9 +12,10 @@ yani` run give the same answer.
 
 Nothing is installed and nothing is uploaded: the page is one self-contained
 file that runs the solve locally, and nuclear data is the only thing it fetches
--- and only the reaction channels the chain actually names, in byte ranges out
-of the published files rather than the files themselves, which is about eight
-times less to download for the same answer.
+-- and only the reaction channels the chain actually names, at the one
+temperature the material is at, in byte ranges out of the published files rather
+than the files themselves, which is about thirty times less to download for the
+same answer.
 
 ## The same solver, locally
 

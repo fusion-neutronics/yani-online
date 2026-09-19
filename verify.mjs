@@ -8,10 +8,10 @@
 //
 //   node verify.mjs [--headed] [--live [Nuclide ...]]
 //
-// `--live` adds a check against the real data origin: that the published MT
-// byte-range index describes the published object, that ranges are honoured,
-// and that a spliced stream is byte-for-byte the whole file's bytes. It is the
-// only part that needs the network.
+// `--live` adds a check against the real data origin: that the published
+// byte-range indexes describe the published objects, that ranges are honoured,
+// and that a stream spliced at one temperature is byte-for-byte the whole
+// file's bytes. It is the only part that needs the network.
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
@@ -21,7 +21,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 import {
-  COALESCE_GAP, assembleNuclideData, planFetch, rangeHeader, reactionRanges, spliceStream, wantedParts,
+  COALESCE_GAP, assembleNuclideData, energyRanges, kelvin, nearestTemperature, planEnergyFetch,
+  planFetch, planNuclide, publishedTemperatures, rangeHeader, reactionRanges, spliceStream,
+  wantedParts,
 } from "./src/ranges.js";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
@@ -59,10 +61,20 @@ const threw = (what, fn) => {
   }
 };
 
-/// A stand-in reactions.arrow and the index over it.
+/// Pseudo-random bytes, so a cut in the wrong place cannot coincidentally match
+/// the right one.
+function noise(length, seed) {
+  const out = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    out[i] = seed & 0xff;
+  }
+  return out;
+}
+
+/// A stand-in reactions.arrow and energy.arrow, and the index over them.
 ///
-/// 128 kB of pseudo-random bytes, so a cut in the wrong place cannot
-/// coincidentally match the right one. The MTs are laid out to put every case
+/// 128 kB of noise for the reactions. The MTs are laid out to put every case
 /// the fetch has to get right into one file:
 ///
 ///   MT 1     20 kB of transport total, wide enough to keep the schema out of
@@ -70,7 +82,9 @@ const threw = (what, fn) => {
 ///   MT 16    wanted, at two temperatures that are two batches back to back,
 ///            and MT 102 wanted and touching them
 ///   MT 2     1 kB of elastic between two wanted batches: close enough to be
-///            swallowed by the coalesce, and it must not reach the decoder
+///            swallowed by the coalesce, and it must not reach the decoder. At
+///            0 K, as ENDF/B-8.1 publishes it, which is the one label in a
+///            real index that no activation channel is tabulated at.
 ///   MT 103   wanted, on the far side of it
 ///   MT 301   100 kB of heating, which is most of the file and none of the run
 ///
@@ -78,19 +92,20 @@ const threw = (what, fn) => {
 /// shape core writes since fusion-neutronics/core#100. Every other MT here has
 /// the one temperature.
 ///
+/// The energy file is 32 kB of noise carrying a grid per label the reactions
+/// use, plus the 0 K one, laid out the way the writer does: the schema, then
+/// the grids back to back, with the 0 K grid first and wide enough to keep the
+/// schema and the wanted grid in separate requests, as it is in the real files
+/// (200 kB on Fe56).
+///
 /// Real published data exercises none of the swallowing: the writer puts the
 /// activation MTs in contiguous runs, so on every ENDF/B-8.1 nuclide checked the
 /// coalesce merges only ranges that already touch. That is why the case is built
 /// here rather than measured there.
 function synthetic() {
-  const file = new Uint8Array(131072);
-  let seed = 1;
-  for (let i = 0; i < file.length; i++) {
-    seed = (seed * 1103515245 + 12345) >>> 0;
-    file[i] = seed & 0xff;
-  }
   return {
-    file,
+    file: noise(131072, 1),
+    energyFile: noise(32768, 7),
     version: {
       reaction_ranges: {
         schema: [64, 64],
@@ -98,10 +113,14 @@ function synthetic() {
           1: { "294K": [128, 20000] },
           16: { "294K": [20128, 64], "600K": [20192, 64] },
           102: { "294K": [20256, 256] },
-          2: { "294K": [20512, 1000] },
+          2: { "0K": [20512, 1000] },
           103: { "294K": [21512, 64] },
           301: { "294K": [30000, 100000] },
         },
+      },
+      energy_ranges: {
+        schema: [64, 64],
+        temperatures: { "0K": [128, 20000], "294K": [20128, 300], "600K": [20428, 300] },
       },
     },
   };
@@ -113,7 +132,7 @@ function synthetic() {
 /// whose failures are quiet: a range off by one splices a stream that still
 /// decodes, out of bytes that mean something else.
 function checkRanges() {
-  const { file, version } = synthetic();
+  const { file, energyFile, version } = synthetic();
 
   eq(reactionRanges(null), null, "no version.json is no index");
   eq(reactionRanges({}), null, "a version.json without the key is no index");
@@ -191,6 +210,94 @@ function checkRanges() {
   // stated rather than pinned. A zero would quietly turn every run of MTs back
   // into one request each, which is the thing it exists to prevent.
   eq(COALESCE_GAP > 0, true, "the coalesce threshold is set");
+
+  // --- the energy grids, and choosing a temperature ---------------------
+
+  eq(energyRanges({}), null, "a version.json without energy_ranges is no grid index");
+  eq(energyRanges({ energy_ranges: { schema: [64, 64], temperatures: {} } }), null,
+     "a grid index naming no temperature is no index");
+  const grids = energyRanges(version);
+  eq([...grids.temperatures.keys()].join(","), "0K,294K,600K", "every grid is indexed, the 0 K one included");
+
+  // One temperature is the schema and that grid, two requests: the 0 K grid
+  // between them is not wanted, and the merge does not reach across it.
+  const grid = planEnergyFetch(grids, new Set(["294K"]));
+  eq(grid.parts.map((p) => p.off).join(","), "64,20128", "one temperature's grid is the schema and one batch");
+  eq(grid.spans.length, 2, "in two requests");
+  eq(grid.bytes, 364, "of 364 bytes");
+  eq(grid.full, 20728, "where the whole file runs to the end of the last grid");
+  const gridStream = spliceStream(grid.parts, grid.spans,
+    grid.spans.map((s) => energyFile.subarray(s.off, s.off + s.len)));
+  eq(gridStream.length, 364 + 8, "and splices to those bytes plus the marker");
+  eq(planEnergyFetch(grids, new Set(["1200K"])).parts.length, 1,
+     "a grid the nuclide does not publish is simply absent");
+
+  eq(kelvin("294K"), 294, "a label reads as Kelvin");
+  eq(kelvin("293.6K"), 293.6, "with a decimal");
+  eq(Number.isNaN(kelvin("room")), true, "and anything else does not");
+
+  // The labels to choose among are the ones a wanted MT is tabulated at. The
+  // 0 K label is real and indexed, and carries elastic scattering only: chosen,
+  // it would plan a stream with every wanted channel absent, which the solver
+  // reads as a nuclide that reacts at zero.
+  eq([...publishedTemperatures(ranges, new Set([16, 102, 103]))].join(","), "294K,600K",
+     "the candidate temperatures are those carrying a wanted MT");
+  eq(publishedTemperatures(ranges, new Set([16, 102, 103])).has("0K"), false,
+     "a label only elastic is tabulated at is not a candidate");
+
+  const labels = ["294K", "600K"];
+  eq(nearestTemperature(labels, 294), "294K", "an exact temperature is chosen");
+  eq(nearestTemperature(labels, 500), "600K", "otherwise the nearest");
+  eq(nearestTemperature(labels, 447), "294K", "and a tie goes to the lower");
+  eq(nearestTemperature(labels, 5000), "600K", "far above every label is the highest");
+  eq(nearestTemperature([], 294), null, "no label is no choice");
+  eq(nearestTemperature(["warm"], 294), null, "a label that is not a temperature is never chosen");
+
+  // The whole decision for one nuclide, as loadCrossSections takes it.
+  const at294 = planNuclide(version, new Set([16, 102, 103]), 294);
+  eq(at294.temperature, "294K", "the form's temperature is chosen when published");
+  eq(at294.reactions.parts.map((p) => p.off).join(","), "64,20128,20256,21512",
+     "the reactions are the wanted MTs at that temperature alone");
+  eq(at294.energy.parts.map((p) => p.off).join(","), "64,20128", "and the grid is that temperature's");
+
+  const at600 = planNuclide(version, new Set([16, 102, 103]), 600);
+  eq(at600.temperature, "600K", "another temperature is another plan");
+  eq(at600.reactions.parts.map((p) => p.off).join(","), "64,20192",
+     "with the one wanted MT published there, and the others absent");
+  eq(at600.energy.parts.map((p) => p.off).join(","), "64,20428", "and its own grid");
+
+  // No reaction index is no narrowing of either file. The energy index alone
+  // cannot be used: the whole reactions file carries every temperature, the
+  // solver settles on the lowest of them, and a grid fetched for another label
+  // would leave that one interpolating against nothing.
+  const unindexed = planNuclide({ energy_ranges: version.energy_ranges }, new Set([16]), 294);
+  eq(unindexed.temperature, null, "no reaction index chooses no temperature");
+  eq(unindexed.reactions, null, "and fetches the reactions whole");
+  eq(unindexed.energy, null, "and the grids whole");
+
+  // A reaction index without a grid index narrows the reactions and fetches
+  // the grids whole, which carry every temperature.
+  const halfIndexed = planNuclide({ reaction_ranges: version.reaction_ranges }, new Set([16]), 294);
+  eq(halfIndexed.temperature, "294K", "a reaction index alone still chooses a temperature");
+  eq(halfIndexed.reactions.parts.length, 2, "and narrows the reactions");
+  eq(halfIndexed.energy, null, "while the grids are fetched whole");
+
+  // A nuclide publishing none of the wanted MTs: the reaction schema alone, and
+  // one grid nearest the form's temperature, because the loader requires the
+  // section for a nuclide whose nuclide.arrow lists temperatures.
+  const inert = planNuclide(version, new Set([200]), 294);
+  eq(inert.temperature, "294K", "with no wanted MT published the grid decides the label");
+  eq(inert.reactions.parts.length, 1, "the reactions are a schema-only plan");
+  eq(inert.energy.parts.map((p) => p.off).join(","), "64,20128", "and one grid is fetched");
+
+  // A plan no smaller than the file is no plan: the whole file asked for plainly
+  // is one request rather than one plus a splice.
+  const single = planNuclide({
+    reaction_ranges: { schema: [0, 8], mts: { 16: { "294K": [8, 8] } } },
+    energy_ranges: { schema: [0, 8], temperatures: { "294K": [8, 8] } },
+  }, new Set([16]), 294);
+  eq(single.reactions, null, "a plan covering the whole reactions file is fetched whole");
+  eq(single.energy, null, "and so is one covering the whole grid file");
 }
 
 /// Check what gets handed to the solver, out of what came back.
@@ -199,88 +306,102 @@ function checkRanges() {
 /// silent error would live: a span filed by arrival rather than by plan splices
 /// a stream from the right bytes in the wrong order, and the loader reads that
 /// without complaint. Every case is built with the spans deliberately out of
-/// order for exactly that reason.
+/// order for exactly that reason, and with both ranged files of one nuclide in
+/// flight together, since a span of the grids filed under the reactions would
+/// be the same silent error across files.
 function checkAssembly() {
-  const { file, version } = synthetic();
-  const plan = planFetch(reactionRanges(version), new Set([16, 102, 103]));
-  const plans = new Map([["Fe56", plan]]);
+  const { file, energyFile, version } = synthetic();
+  const { reactions: plan, energy: grid } = planNuclide(version, new Set([16, 102, 103]), 294);
+  const plans = new Map([["Fe56", new Map([["energy.arrow", grid], ["reactions.arrow", plan]])]]);
   const body = (i) => file.slice(plan.spans[i].off, plan.spans[i].off + plan.spans[i].len);
+  const gridBody = (i) => energyFile.slice(grid.spans[i].off, grid.spans[i].off + grid.spans[i].len);
   const nuclideArrow = new Uint8Array([1, 2, 3]);
-  const energyArrow = new Uint8Array([4, 5, 6]);
 
-  // The jobs as loadCrossSections builds them, but with span 1 ahead of span 0,
-  // which is what a slower first request looks like.
+  // The jobs as loadCrossSections builds them, but with every second span
+  // ahead of its first, which is what a slower first request looks like.
   const jobs = [
     { nuclide: "Fe56", file: "nuclide.arrow" },
-    { nuclide: "Fe56", file: "energy.arrow" },
+    { nuclide: "Fe56", file: "energy.arrow", range: grid.spans[1], spanIndex: 1, status: 206 },
     { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[1], spanIndex: 1, status: 206 },
+    { nuclide: "Fe56", file: "energy.arrow", range: grid.spans[0], spanIndex: 0, status: 206 },
     { nuclide: "Fe56", file: "reactions.arrow", range: plan.spans[0], spanIndex: 0, status: 206 },
   ];
+  const arrived = [nuclideArrow, gridBody(1), body(1), gridBody(0), body(0)];
 
-  const got = assembleNuclideData(jobs, [nuclideArrow, energyArrow, body(1), body(0)], plans);
+  const got = assembleNuclideData(jobs, arrived, plans);
   eq(got.items.length, 3, "all three files are handed over");
   eq(got.missing.size, 0, "nothing is missing");
-  eq(got.saved, plan.full - plan.bytes, "the saving is the file less the spans");
+  eq(got.saved, (plan.full - plan.bytes) + (grid.full - grid.bytes), "the saving is both files less their spans");
   eq(got.stripped, false, "the ranges were honoured");
 
   const reactions = got.items.find((it) => it.file === "reactions.arrow").bytes;
   const wanted = spliceStream(plan.parts, plan.spans, [body(0), body(1)]);
-  eq(reactions.length, wanted.length, "the spliced stream is the expected length");
+  eq(reactions.length, wanted.length, "the spliced reactions are the expected length");
   eq(reactions.every((b, i) => b === wanted[i]), true,
      "spans out of order splice in plan order, not arrival order");
+  const grids = got.items.find((it) => it.file === "energy.arrow").bytes;
+  const wantedGrids = spliceStream(grid.parts, grid.spans, [gridBody(0), gridBody(1)]);
+  eq(grids.every((b, i) => b === wantedGrids[i]) && grids.length === wantedGrids.length, true,
+     "and the grids splice from their own spans, not the reactions'");
 
   // A span that never arrived. The nuclide has to be reported rather than given
-  // a stream with a hole in it.
-  const short = assembleNuclideData(jobs, [nuclideArrow, energyArrow, body(1), undefined], plans);
+  // a stream with a hole in it, whichever file the hole is in.
+  const short = assembleNuclideData(jobs, [nuclideArrow, gridBody(1), body(1), gridBody(0), undefined], plans);
   eq(short.items.some((it) => it.file === "reactions.arrow"), false, "a lost span hands over no stream");
+  eq(short.items.some((it) => it.file === "energy.arrow"), true, "while the file that did arrive whole is handed over");
   eq(short.missing.has("Fe56"), true, "and the nuclide is reported missing");
-  eq(short.saved, 0, "and nothing is counted as saved");
+  const noGrid = assembleNuclideData(jobs, [nuclideArrow, undefined, body(1), gridBody(0), body(0)], plans);
+  eq(noGrid.missing.has("Fe56"), true, "a lost span of the grids reports the nuclide too");
 
   // A proxy that stripped the header: 200 with the whole object rather than 206
   // with the slice. The body is the file, so it is used as the file.
   const stripped = assembleNuclideData(
-    [jobs[0], jobs[1], { ...jobs[2], status: 200 }, { ...jobs[3], status: 200 }],
-    [nuclideArrow, energyArrow, file, file], plans);
+    [jobs[0], jobs[1], { ...jobs[2], status: 200 }, jobs[3], { ...jobs[4], status: 200 }],
+    [nuclideArrow, gridBody(1), file, gridBody(0), file], plans);
   eq(stripped.stripped, true, "a 200 answer to a range is noticed");
   eq(stripped.items.find((it) => it.file === "reactions.arrow").bytes.length, file.length,
      "and the whole object is handed over as the file");
-  eq(stripped.saved, 0, "with nothing claimed as saved");
+  eq(stripped.items.find((it) => it.file === "energy.arrow").bytes.length, wantedGrids.length,
+     "while the file whose ranges were honoured is still spliced");
+  eq(stripped.saved, grid.full - grid.bytes, "with only that file's saving claimed");
   eq(stripped.missing.size, 0, "and the nuclide is not reported missing");
 
-  // A nuclide with no plan at all, which is every nuclide today: both files pass
-  // straight through, and a 404 on either reports it.
+  // A nuclide with no plan at all, which is what a library without an index
+  // gives: every file passes straight through, and a 404 on any reports it.
   const plainJobs = [
     { nuclide: "Li6", file: "nuclide.arrow" },
     { nuclide: "Li6", file: "energy.arrow" },
     { nuclide: "Li6", file: "reactions.arrow" },
   ];
-  const plain = assembleNuclideData(plainJobs, [nuclideArrow, energyArrow, nuclideArrow], new Map());
+  const plain = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, nuclideArrow], new Map());
   eq(plain.items.length, 3, "an unplanned nuclide hands over every file");
   eq(plain.saved, 0, "and saves nothing");
   // A 404 on the grids reports the nuclide too: core refuses a load with no
   // energy.arrow, so handing over the other two would fail later and less
   // clearly.
-  const noGrid = assembleNuclideData(plainJobs, [nuclideArrow, undefined, nuclideArrow], new Map());
-  eq(noGrid.missing.has("Li6"), true, "a 404 on energy.arrow reports the nuclide");
-  const gap = assembleNuclideData(plainJobs, [nuclideArrow, energyArrow, undefined], new Map());
+  const noGrids = assembleNuclideData(plainJobs, [nuclideArrow, undefined, nuclideArrow], new Map());
+  eq(noGrids.missing.has("Li6"), true, "a 404 on energy.arrow reports the nuclide");
+  const gap = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, undefined], new Map());
   eq(gap.missing.has("Li6"), true, "a 404 on the whole-file path reports the nuclide");
 }
 
 /// Check the byte-range fetch against the real origin.
 ///
 /// Opt-in, with `node verify.mjs --live [Nuclide ...]`, because it needs the
-/// network and downloads a whole reactions.arrow to compare against. What it
-/// proves is the part no synthetic fixture can: that the published index
-/// describes the published object, that the origin honours the ranges asked of
-/// it, and that a spliced stream is byte-for-byte the bytes the whole-file path
-/// would have read.
+/// network and downloads whole objects to compare against. What it proves is
+/// the part no synthetic fixture can: that the published indexes describe the
+/// published objects, that the origin honours the ranges asked of it, and that
+/// a stream spliced at one temperature is byte-for-byte the bytes the
+/// whole-file path would have read, for the reactions and for the grids.
 ///
 /// Byte-exactness is the claim rather than "it decodes", because there is
 /// nothing here that decodes Arrow. It was confirmed once with pyarrow that a
 /// byte-exact splice of these ranges opens as a stream and yields record
 /// batches, a fused table and (n,gamma) values identical to reading the whole
 /// file, on Fe56, Li6, Cr52 and Pu239. That is a property of the format, so it
-/// is recorded in dev-readme.md rather than re-run here.
+/// is recorded in dev-readme.md rather than re-run here. That a one-temperature
+/// splice solves to the same answer as the whole file at that temperature is
+/// checked by the browser run against the fixtures, where the solver is real.
 async function checkLive(names) {
   const ORIGIN_LIVE = "https://yamc-data.xsplot.com";
   const library = "endf-b8.1";
@@ -296,43 +417,29 @@ async function checkLive(names) {
     195, 196, 197, 198, 199, 200,
   ]);
 
-  for (const nuclide of names) {
-    const base = `${ORIGIN_LIVE}/${library}/neutron/${nuclide}.arrow`;
-    const version = await (await fetch(`${base}/version.json`)).json();
-    const ranges = reactionRanges(version);
-    if (!ranges) {
-      fail(`${nuclide}: version.json carries no reaction_ranges this build can plan from`
-        + (version.reaction_ranges
-          ? " (it has one in the shape from before fusion-neutronics/core#100; reindex it)"
-          : ""));
-      continue;
-    }
-    const plan = planFetch(ranges, wantedMts);
-
+  /// Fetch a plan's spans, requiring 206 with exactly the bytes asked for, and
+  /// compare the splice against the object fetched whole.
+  async function checkFile(nuclide, base, file, plan) {
     const bodies = [];
-    let honoured = true;
     for (const span of plan.spans) {
-      const resp = await fetch(`${base}/reactions.arrow`, { headers: { Range: rangeHeader(span) } });
+      const resp = await fetch(`${base}/${file}`, { headers: { Range: rangeHeader(span) } });
       if (resp.status !== 206) {
-        fail(`${nuclide}: ${rangeHeader(span)} answered ${resp.status}, not 206`);
-        honoured = false;
-        break;
+        fail(`${nuclide} ${file}: ${rangeHeader(span)} answered ${resp.status}, not 206`);
+        return;
       }
       const body = new Uint8Array(await resp.arrayBuffer());
       if (body.length !== span.len) {
-        fail(`${nuclide}: asked for ${span.len} bytes, got ${body.length}`);
-        honoured = false;
-        break;
+        fail(`${nuclide} ${file}: asked for ${span.len} bytes, got ${body.length}`);
+        return;
       }
       bodies.push(body);
     }
-    if (!honoured) continue;
-    ok(`${nuclide}: ${plan.spans.length} ranges answered 206 exactly, ` +
+    ok(`${nuclide} ${file}: ${plan.spans.length} ranges answered 206 exactly, ` +
        `${(plan.bytes / 1048576).toFixed(2)} MB of ${(plan.full / 1048576).toFixed(2)} MB ` +
        `(${(plan.full / plan.bytes).toFixed(1)}x less)`);
 
     const stream = spliceStream(plan.parts, plan.spans, bodies);
-    const whole = new Uint8Array(await (await fetch(`${base}/reactions.arrow`)).arrayBuffer());
+    const whole = new Uint8Array(await (await fetch(`${base}/${file}`)).arrayBuffer());
 
     // Every part, in the order the stream carries them, against the same bytes
     // of the object fetched whole.
@@ -344,9 +451,26 @@ async function checkLive(names) {
       }
       at += part.len;
     }
-    if (exact) ok(`${nuclide}: the spliced stream is the whole file's bytes at those offsets`);
-    else fail(`${nuclide}: the spliced stream differs from the whole file`);
-    eq(at + 8, stream.length, `${nuclide}: the stream is its parts plus the marker`);
+    if (exact) ok(`${nuclide} ${file}: the spliced stream is the whole file's bytes at those offsets`);
+    else fail(`${nuclide} ${file}: the spliced stream differs from the whole file`);
+    eq(at + 8, stream.length, `${nuclide} ${file}: the stream is its parts plus the marker`);
+  }
+
+  for (const nuclide of names) {
+    const base = `${ORIGIN_LIVE}/${library}/neutron/${nuclide}.arrow`;
+    const version = await (await fetch(`${base}/version.json`)).json();
+    const plan = planNuclide(version, wantedMts, 294);
+    if (!plan.reactions) {
+      fail(`${nuclide}: version.json carries no reaction_ranges this build can plan from`
+        + (version.reaction_ranges
+          ? " (it has one in the shape from before fusion-neutronics/core#100; reindex it)"
+          : ""));
+      continue;
+    }
+    ok(`${nuclide}: planned at ${plan.temperature} for 294 K`);
+    await checkFile(nuclide, base, "reactions.arrow", plan.reactions);
+    if (plan.energy) await checkFile(nuclide, base, "energy.arrow", plan.energy);
+    else fail(`${nuclide}: version.json carries no energy_ranges, so the grids would be fetched whole`);
   }
 }
 
@@ -517,6 +641,10 @@ async function main() {
     // reports, so a script that passed its own would quietly disagree with the
     // chart it is meant to reproduce.
     ["the contact dose", /m\.contact_dose\(by_nuclide=True\)/],
+    // The temperature the page fetched at, so the script reads the same one
+    // rather than the library's lowest, which is what the wheel settles on when
+    // a material names none.
+    ["the temperature", /^material\.temperature = 294\b/m],
     ["plotly", /^import plotly\.graph_objects as go$/m],
   ];
   const missing = wants.filter(([, pattern]) => !pattern.test(script)).map(([name]) => name);
@@ -603,9 +731,17 @@ async function main() {
   if (ranged) {
     const full = [...rangedFull.values()].reduce((n, v) => n + v, 0);
     ok(
-      `fetched MT byte ranges: ${ranged} requests, ` +
+      `fetched byte ranges: ${ranged} requests, ` +
       `${(rangedBytes / 1048576).toFixed(1)} MB of ${(full / 1048576).toFixed(1)} MB ` +
       `across ${rangedFull.size} objects`);
+    // Both files, or the grids are still coming down whole: at one temperature
+    // the grids are a sixth of what they were, and a fetch that left them whole
+    // would pass every check above while paying most of the old bill.
+    for (const file of ["reactions.arrow", "energy.arrow"]) {
+      const objects = [...rangedFull.keys()].filter((path) => path.endsWith(`/${file}`)).length;
+      if (objects) ok(`  ${file}: ${objects} objects fetched by range`);
+      else fail(`  ${file}: fetched whole rather than by range`);
+    }
   } else {
     const sample = `${FIXTURES}/Fe56.arrow/version.json`;
     const version = existsSync(sample) ? JSON.parse(await readFile(sample, "utf8")) : {};
@@ -753,6 +889,34 @@ async function main() {
   const back = await solve();
   if (back === base) ok("and changing it back restores the original exactly");
   else fail(`composition round trip drifted: ${back.toExponential(6)} against ${base.toExponential(6)}`);
+
+  // The temperature. Unlike the probes above it changes what is fetched, not
+  // just what is built: the cross sections held are held at 294 K, so a run at
+  // 600 K has to fetch again, solve against the new bytes rather than the ones
+  // decoded into the old material, and come back to the original exactly when
+  // the form does. Every failure here is a silent one: a stale set of held
+  // nuclides would solve the 600 K run at 294 K and report it as 600 K.
+  const fetched = () => served + missed;
+  const beforeHot = fetched();
+  await page.fill("#temperature", "600");
+  const hot = await solve();
+  if (fetched() > beforeHot) ok(`changing the temperature refetches (${fetched() - beforeHot} requests)`);
+  else fail("changing the temperature refetched nothing: the held nuclides were not invalidated");
+  if (hot > 0 && hot !== base) ok(`and changes the answer (600 K: ${hot.toExponential(4)} Bq against ${base.toExponential(4)})`);
+  else fail(`the 600 K run gave ${hot.toExponential(6)}: the same data as 294 K was solved`);
+  const beforeCold = fetched();
+  await page.fill("#temperature", "294");
+  const cold = await solve();
+  if (fetched() > beforeCold) ok("changing it back refetches too");
+  else fail("changing the temperature back refetched nothing");
+  if (cold === base) ok("and restores the original exactly");
+  else fail(`temperature round trip drifted: ${cold.toExponential(6)} against ${base.toExponential(6)}`);
+  // And a run that changes nothing about the data does not fetch: the
+  // invalidation above must not have turned every run into a download.
+  const beforeStill = fetched();
+  await solve();
+  if (fetched() === beforeStill) ok("a run at the same temperature refetches nothing");
+  else fail(`a run at the same temperature made ${fetched() - beforeStill} requests`);
 
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });
