@@ -125,7 +125,7 @@
   .row { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: end; }
   .row-3 { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; align-items: end; }
   .inline { display: flex; gap: .5rem; }
-  .inline > * { flex: 1; }
+  .inline > * { flex: 1; min-width: 0; }
 
   .tabs { display: flex; gap: .25rem; margin-bottom: .75rem; }
   .tabs button {
@@ -147,6 +147,10 @@
   th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 500; font-size: .78rem; }
   td.num, th.num { text-align: right; font-family: var(--mono); }
+  .schedule-table { table-layout: fixed; }
+  .schedule-table td, .schedule-table th { padding-left: .25rem; padding-right: .25rem; }
+  /* Tighter still on the unit, so "min" fits beside its arrow. */
+  .schedule-table select { padding-left: .3rem; padding-right: 0; }
 
   .note { font-size: .8rem; color: var(--muted); margin: .5rem 0 0; }
   .warn {
@@ -348,7 +352,17 @@
     <!-- ---------------------------------------------------------------- -->
     <section class="panel">
       <h2>Irradiation schedule</h2>
-      <table>
+      <!-- Fixed columns, with the duration given the most room: it holds a
+           number and a unit side by side, and a log-spaced step is "1.47 h"
+           or "8.86 a", which the auto layout was squeezing to "1.:" while the
+           flux column sat half empty. -->
+      <table class="schedule-table">
+        <colgroup>
+          <col style="width: 23%">
+          <col style="width: 29%">
+          <col style="width: 38%">
+          <col style="width: 10%">
+        </colgroup>
         <thead>
           <tr>
             <th>Step</th>

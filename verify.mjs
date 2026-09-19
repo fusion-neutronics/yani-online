@@ -663,6 +663,32 @@ async function main() {
   if (flipped === "linear") ok("an axis scale toggle changes the axis");
   else fail(`toggling the spectrum's x scale left it '${flipped}'`);
 
+  // The default schedule: a pulse, then ten cooling steps whose cumulative
+  // times run log-evenly from a second to ten years. Read off the table as a
+  // user would, since the rows are what the run is built from. Rounded to
+  // three figures for display, so the ratio between consecutive times is
+  // constant to a percent or so rather than exactly.
+  const SECONDS = { s: 1, min: 60, h: 3600, d: 86400, a: 365.25 * 86400 };
+  const schedule = await page.$$eval("#schedule tr", (trs) => trs.map((tr) => ({
+    kind: tr.children[0].textContent.trim(),
+    value: Number(tr.querySelector('input[data-k="value"]').value),
+    unit: tr.querySelector('select[data-k="unit"]').value,
+  })));
+  const cooling = schedule.filter((s) => s.kind === "Cooldown");
+  eq(schedule[0].kind, "Pulse", "the default schedule starts with a pulse");
+  eq(cooling.length, 10, "and has ten cooling steps");
+  const cumulative = [];
+  for (const step of cooling) {
+    cumulative.push((cumulative.at(-1) || 0) + step.value * SECONDS[step.unit]);
+  }
+  const ratios = cumulative.slice(1).map((t, i) => t / cumulative[i]);
+  const logEven = ratios.every((r) => Math.abs(r / ratios[0] - 1) < 0.03);
+  if (Math.abs(cumulative[0] - 1) < 1e-9 && Math.abs(cumulative.at(-1) / (10 * SECONDS.a) - 1) < 0.01 && logEven) {
+    ok(`the cooling times run log-evenly from 1 s to 10 a (ratio ${ratios[0].toFixed(2)} per step)`);
+  } else {
+    fail(`the cooling times are ${cumulative.map((t) => t.toExponential(2)).join(", ")} s`);
+  }
+
   // The Python export. Checked by reading what it actually writes: the failure
   // that matters is a script that downloads but does not describe the setup on
   // screen, which a "did the click work" check would pass.
@@ -859,6 +885,28 @@ async function main() {
     if (traces > 0) ok(`${id} drew ${traces} traces`);
     else fail(`${id} drew nothing`);
   }
+
+  // The decay charts plot time after shutdown, so the ten cooling points of the
+  // default schedule spread evenly across the log axis instead of bunching
+  // against the end of the year of irradiation; the pulse itself sits at zero,
+  // which a log axis leaves off. Checked on the activity chart's x values, and
+  // on the marks it labels the axis with, which are the units a reader thinks
+  // in rather than powers of ten of years.
+  const axis = await page.$eval("#plot-activity", (el) => ({
+    x: el.data[0].x.slice(),
+    ticks: el.layout.xaxis.ticktext ? el.layout.xaxis.ticktext.slice() : [],
+    title: el.layout.xaxis.title.text,
+  }));
+  const afterShutdown = axis.x.filter((t) => t > 0);
+  const xRatios = afterShutdown.slice(1).map((t, i) => t / afterShutdown[i]);
+  if (axis.x.length === schedule.length && axis.x[0] <= 0 && afterShutdown.length === cooling.length
+      && xRatios.every((r) => Math.abs(r / xRatios[0] - 1) < 0.03)) {
+    ok("the activity chart plots the cooling steps log-evenly after shutdown");
+  } else {
+    fail(`the activity chart's x is ${axis.x.map((t) => t.toExponential(2)).join(", ")}`);
+  }
+  eq(axis.ticks.join(" "), "1 s 1 min 1 h 1 d 30 d 1 a 10 a", "and marks the axis in units a reader thinks in");
+  eq(axis.title, "time after shutdown", "under the right name");
 
   // The photon x axis holds still while the slider walks the steps. Its range
   // is set from every step's lines rather than the one drawn, so the reader

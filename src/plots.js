@@ -45,10 +45,35 @@ const YEAR = 365.25 * DAY;
 /// Cooling times read in whatever unit keeps the numbers legible.
 function timeAxis(times) {
   const max = Math.max(...times);
-  if (max >= 2 * YEAR) return { scale: 1 / YEAR, label: "time [years]" };
-  if (max >= 2 * DAY) return { scale: 1 / DAY, label: "time [days]" };
-  if (max >= 2 * 3600) return { scale: 1 / 3600, label: "time [hours]" };
-  return { scale: SECOND, label: "time [s]" };
+  if (max >= 2 * YEAR) return { scale: 1 / YEAR, unit: "years" };
+  if (max >= 2 * DAY) return { scale: 1 / DAY, unit: "days" };
+  if (max >= 2 * 3600) return { scale: 1 / 3600, unit: "hours" };
+  return { scale: SECOND, unit: "s" };
+}
+
+/// The marks a log time axis carries: the units a reader thinks in, rather
+/// than powers of ten of whichever unit the axis happens to be scaled in. A
+/// cooling curve from a second to ten years spans eight and a half decades,
+/// and "10^-7 years" is a number nobody has a feel for where "1 min" is.
+const TIME_MARKS = [
+  [SECOND, "1 s"], [60, "1 min"], [3600, "1 h"], [DAY, "1 d"], [30 * DAY, "30 d"],
+  [YEAR, "1 a"], [10 * YEAR, "10 a"], [100 * YEAR, "100 a"], [1000 * YEAR, "1000 a"],
+];
+
+/// When the results stop being irradiated: the cumulative time at the end of
+/// the last step that had a flux, or zero for a schedule that never did.
+///
+/// The charts plot time *after* this rather than time from the start, because
+/// a decay curve is read from shutdown. On a log axis, cumulative time puts a
+/// year of irradiation ahead of every cooling point, so ten cooling steps from
+/// a second to ten years land between 1.00000003 and 11 years and bunch into a
+/// vertical stack at "1"; measured from shutdown they spread evenly across the
+/// axis, which is what log-spaced steps are for. Steps at or before shutdown
+/// (the pulses, and any cooling between two of them) come out at zero or
+/// negative and are drawn on a linear axis only, where the irradiation history
+/// belongs.
+function shutdownTime(results) {
+  return results.reduce((t, r) => (r.irradiated ? Math.max(t, r.time) : t), 0);
 }
 
 /// The layout every chart shares: recessive axes, no chart junk, hover on.
@@ -247,9 +272,17 @@ function decaySeriesChart(el, results, key, title, yLabel, total = null) {
   const m = mode();
   const xType = scaleOf(el.id, "x");
   const yType = scaleOf(el.id, "y");
-  const times = results.map((r) => r.time);
-  const { scale, label } = timeAxis(times);
+  const shutdown = shutdownTime(results);
+  const times = results.map((r) => r.time - shutdown);
+  const { scale, unit } = timeAxis(times);
   const x = times.map((t) => t * scale);
+  // The marks that fall inside the drawn span, in the axis's own unit. Only on
+  // a log axis: a linear one is read off its numeric ticks in that unit.
+  const after = times.filter((t) => t > 0);
+  const marks = xType === "log" && after.length
+    ? TIME_MARKS.filter(([t]) => t >= Math.min(...after) / 1.5 && t <= Math.max(...after) * 1.5)
+    : [];
+  const label = xType === "log" && marks.length ? "time after shutdown" : `time after shutdown [${unit}]`;
   const { series, peak } =
     total && !breakdownOf(el.id)
       ? totalSeries(results, total.key, total.name)
@@ -322,7 +355,12 @@ function decaySeriesChart(el, results, key, title, yLabel, total = null) {
   }
 
   Plotly.react(el, traces, baseLayout(title, label, yLabel, {
-    xaxis: { type: xType },
+    xaxis: {
+      type: xType,
+      ...(marks.length
+        ? { tickvals: marks.map(([t]) => t * scale), ticktext: marks.map(([, text]) => text) }
+        : {}),
+    },
     yaxis: { type: yType, range: span(yType, floor, peak, 4) },
     layout: { annotations },
   }), CONFIG);

@@ -445,7 +445,20 @@ whose consequences cannot be read off the form. Every chart carries log/linear
 toggles for the axes a scale means something for.
 
 Results are activity, decay heat, contact dose rate, the final inventory and the
-decay photon lines. The contact dose is the odd one of the three time series: it
+decay photon lines. The three time series are plotted against time *after
+shutdown*, the end of the last step that had a flux, not time from the start:
+a decay curve is read from shutdown, and on a log axis the year of irradiation
+ahead of it put every cooling point of the old default within a hundredth of
+"1 year" and stacked them into a vertical line. The default schedule is that
+year at 1e14 n/cm2/s and then ten cooling steps whose cumulative times run
+log-evenly from a second to ten years, the same numbers
+`yani.cooldown_steps((1, "s"), (10, "a"), 10)` gives in the wheel, shown to
+three figures in the unit each fills; measured from shutdown they sit evenly
+across eight and a half decades, which a log axis marks in the units a reader
+thinks in (1 s, 1 min, 1 h, 1 d, 30 d, 1 a, 10 a) rather than in powers of ten
+of years. The pulse itself is at zero and is drawn on a linear axis only, as
+is the irradiation history of a schedule with several pulses. The Python
+export plots the same axis. The contact dose is the odd one of the three time series: it
 is intensive, so unlike activity and decay heat it does not scale with the
 volume on the form -- the semi-infinite slab estimate cancels the geometry, and
 a bigger lump of the same material reads the same at contact. It opens on the
