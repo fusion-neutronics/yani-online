@@ -12,7 +12,7 @@
 
 import { drawAll, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
-import { assembleNuclideData, planFetch, rangeHeader, reactionRanges } from "./ranges.js";
+import { assembleNuclideData, planNuclide, rangeHeader } from "./ranges.js";
 
 // --- nuclear data ---------------------------------------------------------
 
@@ -129,6 +129,12 @@ const state = {
   // without touching the network, and changing the material fetches only the
   // difference.
   haveNuclide: new Set(),
+  // What those cross sections were fetched for: the library and the
+  // temperature, as `dataKey` spells them. A held nuclide is only held for the
+  // data it was fetched from, so when either changes the set above is emptied
+  // and every nuclide is fetched again, from the other library or at the other
+  // temperature.
+  dataKey: null,
   results: null,
   // A year of irradiation, then cooling sampled log-spaced from an hour to ten
   // years. A single cooldown step is a defensible default and a useless plot:
@@ -394,54 +400,77 @@ async function loadChain(solver) {
 const shortKey = (subsection) =>
   ({ decay: "decay", reactions: "reactions", fission_yields: "fpy", branching: "branching" }[subsection]);
 
-/// The range plan for one nuclide, or `null` to fetch its whole file.
+/// The fetch plan for one nuclide, from its `version.json`, or `null` to fetch
+/// every file whole.
 ///
 /// A `version.json` that does not parse is left for the solver to complain
 /// about: it is handed over either way, and the error it raises there names the
 /// section, where one raised here would name a fetch and send the reader
 /// looking in the wrong place.
-function rangePlan(versionBytes, wantedMts) {
-  let ranges;
+///
+/// Which temperature to read at is decided here, per nuclide, as the published
+/// label nearest the one on the form. The solver is not told: it reads the
+/// spliced stream, finds one temperature carrying reactions, and settles on it,
+/// which is the same rule it applies to a whole file with every temperature in
+/// it, where it settles on the lowest. Fetching one temperature is what makes
+/// that rule land on the one asked for.
+function nuclidePlan(versionBytes, wantedMts, kelvin) {
+  let version;
   try {
-    ranges = reactionRanges(JSON.parse(new TextDecoder().decode(versionBytes)));
+    version = JSON.parse(new TextDecoder().decode(versionBytes));
   } catch {
     return null;
   }
-  if (!ranges) return null;
-  const plan = planFetch(ranges, wantedMts);
-  // A plan of nothing but the schema is kept, not discarded. This nuclide
-  // publishes none of the reactions the chain names -- He4 is the real case,
-  // carrying elastic and the transport lookups and no activation channel at
-  // all -- and the solver reads a schema-and-nothing-after-it stream as the
-  // empty subset it is, which is the same zero reactions the whole file would
-  // have produced once the MT filter ran. So the saving here is the whole file
-  // rather than most of it, on exactly the nuclides that had nothing to give.
-  //
-  // A plan that has coalesced into the whole file is not a saving, it is the
-  // whole file fetched as a range. Ask for it plainly instead, which is one
-  // request rather than one plus a splice.
-  return plan.bytes < plan.full ? plan : null;
+  return planNuclide(version, wantedMts, kelvin);
 }
+
+/// The temperature on the form, in Kelvin. An empty or unreadable field is
+/// 294 K, which is what the wheel's `Material` reports when none is given.
+function requestedKelvin() {
+  const text = $("temperature").value.trim();
+  const value = Number(text);
+  return text !== "" && Number.isFinite(value) && value >= 0 ? value : 294;
+}
+
+/// The library and temperature the cross sections are fetched for, as one
+/// string to compare against the last fetch's.
+function dataKey() {
+  return `${$("data-xs").value} at ${requestedKelvin()} K`;
+}
+
+/// How many cross-section requests to keep in flight at once.
+///
+/// Well above the default for a fetch of a few whole files, because reading one
+/// temperature turns each nuclide into about nine small range requests (seven
+/// for the reactions, two for the grid), and a small request costs its round
+/// trip rather than its bytes: measured against the origin, twenty ranges of
+/// 64 kB take 0.6 s over one connection. Every request here goes to one HTTP/2
+/// origin, which multiplexes them over a connection or two, so this is streams
+/// on a connection rather than sockets. Measured on the 462-nuclide Fe56
+/// closure, 5019 requests for 156 MB: 38 s with 12 in flight, 26 s with 24,
+/// 21 s with 48 and 19 s with 96, so past this it is noise.
+const XS_CONCURRENCY = 48;
 
 /// Fetch the cross sections for `nuclides`, and say what came back.
 ///
 /// Two passes, because the first one is the index for the second. `version.json`
-/// is a few kB, the loader requires it anyway, and it now also carries the byte
-/// range of every (MT, temperature) record batch in `reactions.arrow`. So it is
-/// fetched first, and what it says decides how the big file is fetched:
+/// is a few tens of kB, the loader requires it anyway, and it carries the byte
+/// range of every (MT, temperature) record batch in `reactions.arrow` and of
+/// every temperature's grid in `energy.arrow`. So it is fetched first, and what
+/// it says decides how the two big files are fetched:
 ///
-///   - an index, and a solver that can read a spliced stream: one range request
-///     per run of wanted MTs. Measured over 68 ENDF/B-8.1 nuclides that is
-///     109 MB where the whole files are 948 MB, for the same answer, because
-///     the full-grid transport MTs an activation run never reads are most of
-///     each file.
-///   - anything else: the whole file, which is what this did before.
+///   - an index, and a solver that can say which MTs it needs and read a
+///     spliced stream: the wanted MTs at the one published temperature nearest
+///     the form's, and the grid at that temperature, as range requests.
+///     Measured on the 462-nuclide closure of Fe56 against ENDF/B-8.1, that is
+///     a fifth of the bytes that every temperature of the wanted MTs was, and a
+///     thirtieth of the whole files.
+///   - anything else: the whole files, which is what this did before.
 ///
 /// Fetching `version.json` first pays for itself on the fallback path too. The
 /// chain names far more nuclides than any one library publishes, and an
-/// unpublished nuclide used to 404 three times; now it 404s once and the other
-/// two requests are never issued. On the Fe56 closure that is 1383 nuclides and
-/// 2766 requests that no longer happen.
+/// unpublished nuclide used to 404 three times; now it 404s once and the rest of
+/// its requests are never issued.
 ///
 /// Every fetch here is optional, which is a deliberate difference from the
 /// wheel. The chain names more nuclides than any single library evaluates, so a
@@ -451,17 +480,23 @@ function rangePlan(versionBytes, wantedMts) {
 /// zero, so the count is surfaced rather than logged.
 async function loadCrossSections(solver, nuclides) {
   const library = $("data-xs").value;
+  const kelvin = requestedKelvin();
   const url = (nuclide, file) => `${ORIGIN}/${library}/neutron/${nuclide}.arrow/${file}`;
 
   setStatus(`Checking what ${nuclides.length} nuclides publish…`);
   const versions = await fetchAll(
     nuclides.map((nuclide) => ({ url: url(nuclide, "version.json"), optional: true, nuclide })),
-    (f) => { $("progress").value = f; });
+    (f) => { $("progress").value = f; }, XS_CONCURRENCY);
 
   const items = [];
   const missing = new Set();
+  // Nuclide to file to the plan its range requests were issued from.
   const plans = new Map();
   const jobs = [];
+  // How many nuclides were planned at each temperature label, for the status:
+  // the label chosen is the nearest published one, which is usually the one
+  // asked for and is worth saying when it is not.
+  const temperatures = new Map();
   for (const [i, nuclide] of nuclides.entries()) {
     if (!versions[i]) {
       // Not published by this library. Nothing else under this directory can
@@ -471,41 +506,50 @@ async function loadCrossSections(solver, nuclides) {
     }
     items.push({ nuclide, file: "version.json", bytes: versions[i] });
     jobs.push({ url: url(nuclide, "nuclide.arrow"), optional: true, nuclide, file: "nuclide.arrow" });
+
+    const plan = state.wantedMts && nuclidePlan(versions[i], state.wantedMts, kelvin);
+    if (plan && plan.temperature !== null) {
+      temperatures.set(plan.temperature, (temperatures.get(plan.temperature) || 0) + 1);
+    }
     // The union energy grids, their own object since fusion-neutronics/core#100
     // moved them out of nuclide.arrow. Every cross section is interpolated
     // against them, so a nuclide without this one cannot activate: core refuses
-    // the load outright rather than answering with no grid. Fetched whole, not
-    // ranged -- this page has no temperature to narrow to, since an activation
-    // run folds the cross sections at whatever temperatures the library
-    // publishes.
+    // the load outright rather than answering with no grid. One grid is fetched
+    // when the index says where it is, the whole file when it does not.
     //
-    // Optional in the same sense the two below are: a 404 puts the nuclide in
+    // Optional in the same sense the others are: a 404 puts the nuclide in
     // `missing` and the count is surfaced, which beats failing the whole run
     // over one nuclide the library does not carry.
-    jobs.push({ url: url(nuclide, "energy.arrow"), optional: true, nuclide, file: "energy.arrow" });
-    const plan = state.wantedMts && rangePlan(versions[i], state.wantedMts);
-    if (plan) {
-      plans.set(nuclide, plan);
-      plan.spans.forEach((range, spanIndex) => {
-        jobs.push({
-          url: url(nuclide, "reactions.arrow"),
-          range, spanIndex, optional: true, nuclide, file: "reactions.arrow",
-        });
+    const files = [["energy.arrow", plan && plan.energy], ["reactions.arrow", plan && plan.reactions]];
+    for (const [file, filePlan] of files) {
+      if (!filePlan) {
+        jobs.push({ url: url(nuclide, file), optional: true, nuclide, file });
+        continue;
+      }
+      if (!plans.has(nuclide)) plans.set(nuclide, new Map());
+      plans.get(nuclide).set(file, filePlan);
+      filePlan.spans.forEach((range, spanIndex) => {
+        jobs.push({ url: url(nuclide, file), range, spanIndex, optional: true, nuclide, file });
       });
-    } else {
-      jobs.push({ url: url(nuclide, "reactions.arrow"), optional: true, nuclide, file: "reactions.arrow" });
     }
   }
 
-  const planned = [...plans.values()];
-  const budget = planned.reduce((n, p) => n + p.bytes, 0);
-  const whole = planned.reduce((n, p) => n + p.full, 0);
+  let budget = 0;
+  let whole = 0;
+  for (const byFile of plans.values()) {
+    for (const plan of byFile.values()) {
+      budget += plan.bytes;
+      whole += plan.full;
+    }
+  }
   const count = nuclides.length - missing.size;
+  const labels = [...temperatures.keys()].sort((a, b) => Number.parseFloat(a) - Number.parseFloat(b));
   setStatus(
     `Fetching cross sections for ${count} nuclides` +
-    (planned.length ? `, ${mb(budget)} of reactions rather than ${mb(whole)}…` : "…"));
+    (labels.length ? ` at ${labels.join(", ")}` : "") +
+    (plans.size ? `, ${mb(budget)} rather than ${mb(whole)}…` : "…"));
   $("progress").value = 0;
-  const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
+  const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; }, XS_CONCURRENCY);
 
   // The assembly is in ranges.js so it can be checked without a browser: which
   // span belongs to which stream, and what to do with a range that came back as
@@ -515,9 +559,9 @@ async function loadCrossSections(solver, nuclides) {
   for (const nuclide of got.missing) missing.add(nuclide);
   if (got.stripped) {
     // A proxy that strips the header strips it from every request, so a plan of
-    // three spans downloads the whole file three times. The requests already in
-    // flight here pay that; the next run does not, and it is the runs after the
-    // first that a session spends.
+    // several spans downloads the whole file several times. The requests
+    // already in flight here pay that; the next run does not, and it is the
+    // runs after the first that a session spends.
     state.wantedMts = null;
   }
 
@@ -577,9 +621,16 @@ function materialSpec() {
 /// material -- composition, density, units, fraction type, volume -- rebuilds,
 /// and the decoded data goes with the material it belonged to. Set after the
 /// call, so a build that failed is not recorded as applied.
+///
+/// The library and temperature the cross sections come from are in the key as
+/// well, though the builder never sees them, for the same reason: the material
+/// holds the sections decoded into it, and a change of either is a change of
+/// what every one of those should say. Rebuilding is what lets go of them, so
+/// that the next solve decodes what `ensureData` fetches in their place rather
+/// than reading the cached ones through.
 async function applyMaterial(solver) {
   const spec = materialSpec();
-  const key = JSON.stringify(spec);
+  const key = JSON.stringify({ spec, data: dataKey() });
   if (key === state.materialKey) return;
   // Cleared first: a failed build leaves the session holding whichever material
   // it had before, and calling that one applied would run the next solve
@@ -664,6 +715,7 @@ async function currentSetup() {
       fission_yields: $("data-fpy").value,
       branching: $("data-branching").value,
     },
+    temperature: requestedKelvin(),
     material,
     spectrum,
     schedule: state.schedule.map((s) => ({ ...s })),
@@ -737,10 +789,19 @@ async function refreshBudget() {
   }
   const required = await state.solver.requiredNuclides();
   if (token !== budgetToken) return;
-  const wanted = required.filter((n) => !state.haveNuclide.has(n));
+  const wanted = required.filter((n) => !heldNuclides().has(n));
   $("budget").textContent = wanted.length
     ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
     : `${required.length} nuclides needed, all held.`;
+}
+
+/// The nuclides held for the library and temperature currently on the form.
+///
+/// Empty when either has changed since they were fetched: a nuclide held at
+/// 294 K is not held at 600 K, and the budget has to say so before the run
+/// rather than the run discovering it.
+function heldNuclides() {
+  return state.dataKey === dataKey() ? state.haveNuclide : new Set();
 }
 
 /// Fetch whatever the current material needs that is not already held.
@@ -763,6 +824,14 @@ async function ensureData() {
     if (state.caps.requiredMts) {
       state.wantedMts = new Set(await state.solver.requiredMts());
     }
+  }
+  const key = dataKey();
+  if (state.dataKey !== key) {
+    // Fetched for another library or temperature, so held for nothing the
+    // current form asks for. The material was rebuilt by `applyMaterial` on the
+    // same change, which is what let go of the sections decoded from them.
+    state.haveNuclide.clear();
+    state.dataKey = key;
   }
   const required = await state.solver.requiredNuclides();
   const wanted = required.filter((n) => !state.haveNuclide.has(n));
@@ -790,7 +859,7 @@ async function ensureData() {
   // can run a closure over a slow connection and one that cannot.
   setStatus(
     `Loaded ${mb(held)}` +
-    (saved ? `, skipping ${mb(saved)} of transport cross sections.` : "."));
+    (saved ? `, skipping ${mb(saved)} of other temperatures and transport cross sections.` : "."));
 }
 
 async function run() {
@@ -954,6 +1023,10 @@ async function main() {
   });
   $("pnnl-select").addEventListener("change", refreshBudget);
   $("volume").addEventListener("change", refreshBudget);
+  // The library and the temperature decide what is fetched, so a change of
+  // either turns "all held" back into a download.
+  $("data-xs").addEventListener("change", refreshBudget);
+  $("temperature").addEventListener("change", refreshBudget);
 
   // Every control that changes the spectrum redraws it. `input` rather than
   // `change` on the pasted vector so the plot follows the typing.
