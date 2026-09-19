@@ -798,6 +798,68 @@ async function main() {
     else fail(`${id} drew nothing`);
   }
 
+  // The photon x axis holds still while the slider walks the steps. Its range
+  // is set from every step's lines rather than the one drawn, so the reader
+  // sees where the whole spectrum lives and nothing jumps as they scroll, and
+  // a zoom they make persists across steps. Each is checked by moving the
+  // slider, because the failure is one a single drawn step cannot show.
+  const photonAxis = () => page.$eval("#plot-photons", (el) => ({
+    range: JSON.stringify(el.layout.xaxis.range),
+    type: el.layout.xaxis.type,
+    // The marker trace carries one point per line, in MeV.
+    lines: el.data[1].x.slice(),
+  }));
+  const setPhotonStep = async (i) => {
+    await page.evaluate((i) => {
+      const slider = document.getElementById("photon-step");
+      slider.value = String(i);
+      slider.dispatchEvent(new Event("input"));
+    }, i);
+    await page.waitForTimeout(250);
+  };
+  const stepCount = await page.$eval("#photon-step", (el) => Number(el.max) + 1);
+  const initial = await photonAxis();
+  const [lo, hi] = JSON.parse(initial.range);
+  const moved = [];
+  let outside = 0;
+  for (let i = 0; i < stepCount; i++) {
+    await setPhotonStep(i);
+    const axis = await photonAxis();
+    if (axis.range !== initial.range) moved.push(i + 1);
+    // A log axis's range is in decades; the lines are in MeV either way.
+    for (const x of axis.lines) {
+      const v = axis.type === "log" ? Math.log10(x) : x;
+      if (v < lo || v > hi) outside++;
+    }
+  }
+  if (!moved.length) ok(`the photon x axis holds still across ${stepCount} steps`);
+  else fail(`the photon x axis moved at steps ${moved.join(", ")}`);
+  if (!outside) ok("and its initial range covers every step's lines");
+  else fail(`${outside} photon lines fall outside the initial x range`);
+
+  // A zoom the reader makes, by dragging across the plot as they would. Not
+  // `Plotly.relayout`: that is the page's edit, not the reader's, and it is
+  // the reader's that `uirevision` keeps. A level drag zooms the x axis alone.
+  await page.$eval("#plot-photons", (el) => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(250);
+  const box = await page.$eval("#plot-photons .nsewdrag", (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, w: r.width, h: r.height };
+  });
+  const level = box.y + box.h / 2;
+  await page.mouse.move(box.x + box.w * 0.3, level);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.w * 0.7, level, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const zoomed = await photonAxis();
+  await setPhotonStep(0);
+  const after = await photonAxis();
+  if (zoomed.range === initial.range) fail("dragging across the photon plot did not zoom it");
+  else if (after.range === zoomed.range) ok("a zoom of the photon x axis survives moving the slider");
+  else fail(`the slider undid a zoom: ${after.range} against ${zoomed.range}`);
+  await setPhotonStep(stepCount - 1);
+
   // The dose chart draws only when the vendored solver reports the field, so a
   // checkout whose vendor/ predates it skips rather than fails. Once bumped
   // this is an assertion like the others.

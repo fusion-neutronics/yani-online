@@ -365,6 +365,50 @@ function inventoryChart(el, results) {
   ), CONFIG);
 }
 
+/// A token that changes when the photon plot's x axis should be drawn afresh.
+///
+/// Plotly keeps a reader's zoom across `Plotly.react` calls whose `uirevision`
+/// has not changed, so the slider through the steps redraws the lines and
+/// leaves the axis where the reader put it. A new set of results is a new plot,
+/// and a scale toggle is a new axis, since a log range is in decades and a
+/// linear one in MeV; either changes the token, and the axis is drawn again at
+/// its full extent.
+const photonRevisions = new WeakMap();
+let nextPhotonRevision = 1;
+function photonRevision(results, xType) {
+  if (!photonRevisions.has(results)) photonRevisions.set(results, nextPhotonRevision++);
+  return `${photonRevisions.get(results)}:${xType}`;
+}
+
+/// The x range showing every photon line of every step, in the axis's own
+/// coordinates (MeV on a linear axis, decades on a log one), with a twentieth
+/// of the extent to spare each side so an outermost line is not on the frame.
+/// `null` when no step has a line.
+///
+/// Every step rather than the one drawn, because the slider walks the steps and
+/// an axis that followed each step's own lines would jump under the reader: the
+/// lines of the first step after an irradiation are gone by the last, and a
+/// plot autoranged per step zooms in on the remnant as they scroll. Set once
+/// from the whole run, the axis says where the spectrum lives and holds still.
+function photonEnergyRange(results, xType) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const step of results) {
+    for (const e of step.photon_energy || []) {
+      // A line at no energy is not a line, and has no logarithm.
+      if (!(e > 0)) continue;
+      if (e < lo) lo = e;
+      if (e > hi) hi = e;
+    }
+  }
+  if (!(lo <= hi)) return null;
+  const a = at(xType, lo / 1e6);
+  const b = at(xType, hi / 1e6);
+  // A single line has no extent to pad by: half a decade, or half its energy.
+  const pad = a === b ? (xType === "log" ? 0.5 : a / 2) : (b - a) / 20;
+  return [xType === "log" ? a - pad : Math.max(0, a - pad), b + pad];
+}
+
 /// The decay photon spectrum is a set of discrete lines, not a curve, so it
 /// wants stems rather than a join between neighbours -- a line through them
 /// would draw continuum that is not there.
@@ -376,13 +420,18 @@ export function drawPhotons(results, stepIndex) {
   const step = results[stepIndex];
   const energies = step.photon_energy || [];
   const intensities = step.photon_intensity || [];
-  if (!energies.length) {
+  const xType = scaleOf(el.id, "x");
+  const yType = scaleOf(el.id, "y");
+  const xRange = photonEnergyRange(results, xType);
+  if (xRange === null) {
+    // No step has a line, so there is nothing to draw and no axis to hold.
     Plotly.purge(el);
     return;
   }
-  const xType = scaleOf(el.id, "x");
-  const yType = scaleOf(el.id, "y");
-  const peak = Math.max(...intensities);
+  // A step with no lines keeps its axes rather than being purged: the reader
+  // scrolling through it should see an empty frame where the spectrum lives,
+  // not a plot that vanishes and comes back somewhere else.
+  const peak = energies.length ? Math.max(...intensities) : 1;
   // Five decades down from the strongest; below that a line is not physics.
   const floor = peak / 1e5;
   // Where a stem starts. The bottom of the visible range, which is the floor on
@@ -425,8 +474,14 @@ export function drawPhotons(results, stepIndex) {
       // sparse above 1 MeV, so linear stacks most of the lines on top of each
       // other at the origin -- which is occasionally the view someone wants of
       // the high-energy end, hence the toggle.
-      xaxis: { type: xType },
-      yaxis: { type: yType, range: span(yType, floor, peak, 8) },
+      //
+      // The range is the whole run's, not this step's, and `uirevision` keeps
+      // a zoom across the slider: see `photonEnergyRange` and
+      // `photonRevision`. The y axis is the step's own, since the intensities
+      // fall by decades over a cooling schedule and a fixed range would leave
+      // the late steps as stubs along the floor.
+      xaxis: { type: xType, range: xRange, uirevision: photonRevision(results, xType) },
+      yaxis: { type: yType, ...(energies.length ? { range: span(yType, floor, peak, 8) } : {}) },
       layout: { showlegend: false, hovermode: "closest" },
     },
   ), CONFIG);
