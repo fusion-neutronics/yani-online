@@ -84,6 +84,21 @@ const api = {
   },
   loadChain: () => session.loadChain(),
 
+  /// Start the session over: no chain, no cross sections, no material.
+  ///
+  /// The page needs this when a chain library changes after a run. A chain
+  /// section can be added again, but not taken away, and a library that does
+  /// not publish one of the optional files would leave the previous library's
+  /// copy in place under the new one's name. A fresh session is the only clean
+  /// slate the wasm offers, and it is cheap: the data is refetched anyway,
+  /// since which reactions the chain names decides which byte ranges were
+  /// worth having. The old session is freed rather than left for the garbage
+  /// collector, which does not see wasm memory.
+  reset() {
+    session.free();
+    session = new YaniSession();
+  },
+
   /// Register fetched cross sections, answering with the bytes taken on.
   ///
   /// The page cannot measure that itself: the buffers are transferred here, so

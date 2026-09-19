@@ -119,6 +119,11 @@ function logSpacedCooldowns(start, stop, n) {
 const state = {
   solver: null,
   chainLoaded: false,
+  // The chain libraries the loaded chain came from, as `chainKey` spells them,
+  // or null before the first load. A chain is a property of four dropdowns,
+  // and a change to any of them after a run has to start the session over:
+  // see `ensureData`.
+  chainKey: null,
   // What the vendored solver can do that an older one could not. Feature
   // detected at boot rather than read off vendor/CORE_COMMIT: the page has to
   // choose a fetch strategy before it has fetched anything, and a commit hash
@@ -245,6 +250,7 @@ class Solver {
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
   loadChain() { return this.call("loadChain"); }
+  reset() { return this.call("reset"); }
   run(spectraJson, scheduleJson) { return this.call("run", [spectraJson, scheduleJson]); }
 
   // The two that hand over data. The buffers are transferred rather than
@@ -441,6 +447,14 @@ function requestedKelvin() {
 /// string to compare against the last fetch's.
 function dataKey() {
   return `${$("data-xs").value} at ${requestedKelvin()} K`;
+}
+
+/// The four libraries the chain is built from, as one string to compare
+/// against the loaded chain's.
+function chainKey() {
+  return ["reactions", "decay", "fission_yields", "branching"]
+    .map((subsection) => $(`data-${shortKey(subsection)}`).value)
+    .join(" / ");
 }
 
 /// How many cross-section requests to keep in flight at once.
@@ -800,6 +814,10 @@ async function refreshBudget() {
     $("budget").textContent = "Run to fetch the chain and see the nuclide count.";
     return;
   }
+  if (state.chainKey !== chainKey()) {
+    $("budget").textContent = "The chain libraries changed: run to fetch the new chain and its cross sections.";
+    return;
+  }
   const required = await state.solver.requiredNuclides();
   if (token !== budgetToken) return;
   const wanted = required.filter((n) => !heldNuclides().has(n));
@@ -827,9 +845,26 @@ function heldNuclides() {
 /// Already-loaded nuclides are skipped, so iterating on a schedule or a
 /// spectrum costs nothing after the first run.
 async function ensureData() {
+  if (state.chainLoaded && state.chainKey !== chainKey()) {
+    // A chain library changed since the chain was parsed. The chain could be
+    // added again, but a section the new library does not publish would stay
+    // behind under the old library's bytes, and the cross sections held were
+    // fetched for the reactions the old chain named, so a channel the new one
+    // names could be absent from a spliced stream and react at zero without
+    // saying so. Starting the session over is the one way to be sure of both,
+    // and the material is rebuilt with it, since a fresh session has none.
+    await state.solver.reset();
+    state.chainLoaded = false;
+    state.wantedMts = null;
+    state.haveNuclide.clear();
+    state.dataKey = null;
+    state.materialKey = null;
+    await applyMaterial(state.solver);
+  }
   if (!state.chainLoaded) {
     await loadChain(state.solver);
     state.chainLoaded = true;
+    state.chainKey = chainKey();
     // Which MTs a run reads is a property of the chain, so it is asked once the
     // chain is in and then held: it decides which byte ranges of every
     // nuclide's reactions.arrow are worth fetching. A solver too old to answer
@@ -991,6 +1026,17 @@ function renderComposition() {
   });
 }
 
+/// A flux for the schedule table: "1e14" rather than the fifteen digits a
+/// number input would show of it, of which the cell has room for eight. So the
+/// rate is a text input, in the exponent form Python and JavaScript both read,
+/// and anything under a hundred thousand stays plain.
+function formatRate(rate) {
+  if (!Number.isFinite(rate)) return "";
+  if (Math.abs(rate) < 1e5) return String(rate);
+  const [mantissa, exponent] = rate.toExponential(3).split("e");
+  return `${Number(mantissa)}e${Number(exponent)}`;
+}
+
 function renderSchedule() {
   const body = $("schedule");
   body.innerHTML = "";
@@ -1003,7 +1049,7 @@ function renderSchedule() {
       `<td>${step.kind === "pulse" ? "Pulse" : "Cooldown"}</td>` +
       `<td class="num">${
         step.kind === "pulse"
-          ? `<input type="number" step="any" value="${step.rate}" data-s="${i}" data-k="rate">`
+          ? `<input type="text" inputmode="decimal" value="${formatRate(step.rate)}" data-s="${i}" data-k="rate">`
           : "--"
       }</td>` +
       `<td class="num"><div class="inline">` +
@@ -1052,9 +1098,11 @@ async function main() {
   $("pnnl-select").addEventListener("change", refreshBudget);
   $("volume").addEventListener("change", refreshBudget);
   // The library and the temperature decide what is fetched, so a change of
-  // either turns "all held" back into a download.
-  $("data-xs").addEventListener("change", refreshBudget);
-  $("temperature").addEventListener("change", refreshBudget);
+  // either turns "all held" back into a download, and a chain library turns it
+  // into a fresh session.
+  for (const id of ["data-xs", "data-reactions", "data-decay", "data-fpy", "data-branching", "temperature"]) {
+    $(id).addEventListener("change", refreshBudget);
+  }
 
   // Every control that changes the spectrum redraws it. `input` rather than
   // `change` on the pasted vector so the plot follows the typing.
@@ -1083,7 +1131,17 @@ async function main() {
   $("schedule").addEventListener("input", (e) => {
     const { s, k } = e.target.dataset;
     if (s === undefined) return;
-    state.schedule[s][k] = k === "unit" ? e.target.value : Number(e.target.value);
+    if (k === "unit") {
+      state.schedule[s][k] = e.target.value;
+      return;
+    }
+    // The rate is free text, so it can fail to be a number in a way a number
+    // input cannot. A half-typed "2e" is marked and the last good value kept,
+    // rather than a NaN reaching the solver as a step with no rate.
+    const value = Number(e.target.value.trim());
+    const valid = e.target.value.trim() !== "" && Number.isFinite(value) && value >= 0;
+    e.target.classList.toggle("invalid", !valid);
+    if (valid) state.schedule[s][k] = value;
   });
   $("schedule").addEventListener("click", (e) => {
     const i = e.target.dataset.removeStep;

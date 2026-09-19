@@ -202,6 +202,18 @@ empty. `verify.mjs` checks the round trip: a run at 600 K fetches again and
 gives a different answer, a run back at 294 K fetches again and gives the
 original exactly, and a run that changes neither fetches nothing.
 
+Changing one of the four chain libraries after a run goes further and starts
+the wasm session over (`reset` in worker.js), then fetches the chain and every
+cross section again. A chain section can be added to a session but not taken
+away, so a library that does not publish one of the optional files would leave
+the previous library's copy in place under the new one's name; and the cross
+sections held were fetched for the reactions the old chain named, so a channel
+the new chain names could be absent from a spliced stream and react at zero
+without saying so. A fresh session is the one clean slate the wasm offers. The
+budget line says the chain will be fetched again as soon as the dropdown moves,
+and `verify.mjs` checks that the run does, and that a run after it fetches
+nothing again.
+
 Measured against the origin with the built page, on an Fe56 material against
 ENDF/B-8.1, whose closure is 462 nuclides, all published:
 
