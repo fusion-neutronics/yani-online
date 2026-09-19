@@ -230,12 +230,24 @@ export function wireAxisScales(onChange) {
 }
 
 
-/// Split a per-step list of {nuclide: value} into the largest few by peak, with
-/// everything else summed into "Other".
+/// The nuclides worth naming, and the rest as "Other".
 ///
-/// Ranked on peak rather than final value because which nuclide dominates
-/// changes completely with cooling time -- ranking on the last step would drop
-/// whatever mattered for the first hundred days.
+/// Named by who *leads*: every nuclide that is the largest at some step is
+/// named, in the order they first lead, and if that leaves room the slots are
+/// filled by peak. Not the four largest peaks, which is what this did: a
+/// cooling curve is a succession, and the peaks all belong to its first hour.
+/// On aluminium the four largest peaks are Al28, Mg27, Na24 and its isomer,
+/// every one gone within a week, and from then on the whole inventory was the
+/// grey "Other" line: the plot exists to say which nuclide dominates at which
+/// decade, and it hid exactly that. Leading is the question the plot answers,
+/// so leading is what earns a name.
+///
+/// When more nuclides lead than there are hues, the ones that lead for more
+/// of the run stay named, then the earlier ones. The steps are log-spaced, so
+/// a step is roughly a decade of time, and leading for more steps is leading
+/// for more of the curve. "Other" is the sum of everything unnamed, and can be
+/// the largest line at a step where no one nuclide dominates; that is a true
+/// reading rather than a failure of the rule.
 function topSeries(perStep) {
   const keys = new Set();
   for (const step of perStep) for (const k of Object.keys(step)) keys.add(k);
@@ -243,8 +255,35 @@ function topSeries(perStep) {
   for (const k of keys) {
     peak.set(k, Math.max(...perStep.map((s) => s[k] || 0)));
   }
-  const ranked = [...peak.entries()].sort((a, b) => b[1] - a[1]);
-  const top = ranked.slice(0, TOP_N).map(([k]) => k);
+
+  // Who leads at each step, with the first step they lead at and how many.
+  const leads = new Map();
+  perStep.forEach((step, i) => {
+    let best = null;
+    for (const [k, v] of Object.entries(step)) {
+      if (v > 0 && (best === null || v > step[best])) best = k;
+    }
+    if (best === null) return;
+    const lead = leads.get(best) || { first: i, steps: 0 };
+    lead.steps++;
+    leads.set(best, lead);
+  });
+
+  const ranked = [...keys].sort((a, b) => {
+    const la = leads.get(a);
+    const lb = leads.get(b);
+    if (la && lb) return lb.steps - la.steps || la.first - lb.first || peak.get(b) - peak.get(a);
+    if (la || lb) return la ? -1 : 1;
+    return peak.get(b) - peak.get(a);
+  });
+  // Drawn in the order they first lead, so the legend reads as the run does,
+  // with the fill-ins after by peak.
+  const top = ranked.slice(0, TOP_N).sort((a, b) => {
+    const fa = leads.get(a) ? leads.get(a).first : Infinity;
+    const fb = leads.get(b) ? leads.get(b).first : Infinity;
+    return fa - fb || peak.get(b) - peak.get(a);
+  });
+
   const series = top.map((name) => ({
     name,
     values: perStep.map((s) => s[name] || 0),
@@ -252,7 +291,7 @@ function topSeries(perStep) {
   const rest = perStep.map((s) =>
     Object.entries(s).reduce((acc, [k, v]) => (top.includes(k) ? acc : acc + v), 0));
   if (rest.some((v) => v > 0)) series.push({ name: "Other", values: rest, other: true });
-  return { series, peak: ranked.length ? ranked[0][1] : 0 };
+  return { series, peak: Math.max(0, ...peak.values()) };
 }
 
 /// A decayed-away nuclide is numerical dust; letting it set the scale squashes

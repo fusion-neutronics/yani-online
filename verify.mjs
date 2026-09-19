@@ -1081,6 +1081,30 @@ async function main() {
   if (back === base) ok("and changing it back restores the original exactly");
   else fail(`composition round trip drifted: ${back.toExponential(6)} against ${base.toExponential(6)}`);
 
+  // Which nuclides get a name. Aluminium is the case that showed the old rule
+  // up: its four largest peaks (Al28, Mg27, Na24 and its isomer) are all gone
+  // within a week, and naming by peak left the whole of the years as the grey
+  // "Other" line. Naming by who leads at some step has to put a name on the
+  // largest series at the last step as well as at the first, and keep the
+  // early leader too.
+  await page.fill('#composition input[data-k="name"]', "Al27");
+  await solve();
+  const leaders = await page.$eval("#plot-activity", (el) => {
+    const at = (i) => el.data
+      .map((t) => [t.name, t.y[i]])
+      .filter(([, v]) => v != null)
+      .sort((a, b) => b[1] - a[1])[0];
+    return { first: at(0), last: at(el.data[0].y.length - 1), names: el.data.map((t) => t.name) };
+  });
+  if (leaders.last && leaders.last[0] !== "Other") ok(`the nuclide leading at the last step is named (${leaders.last[0]})`);
+  else fail(`the last step's largest series is ${leaders.last ? leaders.last[0] : "nothing"}: ${leaders.names.join(", ")}`);
+  if (leaders.first && leaders.first[0] !== "Other") ok(`and so is the one leading at the first (${leaders.first[0]})`);
+  else fail(`the first step's largest series is ${leaders.first ? leaders.first[0] : "nothing"}`);
+  await page.fill('#composition input[data-k="name"]', "Fe56");
+  const ironAgain = await solve();
+  if (ironAgain === base) ok("and iron comes back exactly");
+  else fail(`iron drifted after aluminium: ${ironAgain.toExponential(6)} against ${base.toExponential(6)}`);
+
   // The temperature. Unlike the probes above it changes what is fetched, not
   // just what is built: the cross sections held are held at 294 K, so a run at
   // 600 K has to fetch again, solve against the new bytes rather than the ones
