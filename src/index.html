@@ -207,7 +207,59 @@
 <main>
   <!-- ------------------------------------------------------------------ -->
   <div>
-    <section class="panel">
+    <section class="panel" id="spectrum-panel">
+      <h2>Neutron spectrum</h2>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="preset">Preset</button>
+        <button role="tab" aria-selected="false" data-tab="groups">Group structure</button>
+      </div>
+
+      <div data-panel="preset">
+        <label>
+          <span>Shape</span>
+          <!-- Filled from src/spectra.js at boot: the presets are generated
+               data, and a list kept here would drift from it. -->
+          <select id="spectrum-preset"></select>
+        </label>
+      </div>
+
+      <div data-panel="groups" hidden>
+        <label>
+          <span>Boundaries</span>
+          <!-- The ten neutron structures the solver resolves by name, coarsest
+               first after the default. The two photon structures it also knows
+               (VITAMIN-J-42, CCFE-24-PHOTON) are deliberately absent: this is a
+               neutron spectrum, and a photon grid pasted into it would resolve
+               and solve and mean nothing. -->
+          <select id="group-structure">
+            <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV to 1 GeV)</option>
+            <option value="XMAS-172">XMAS-172 (172 groups, to 19.6 MeV)</option>
+            <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups, to 19.6 MeV)</option>
+            <option value="SCALE-252">SCALE-252 (252 groups, to 20 MeV)</option>
+            <option value="TRIPOLI-315">TRIPOLI-315 (315 groups, to 19.6 MeV)</option>
+            <option value="SHEM-361">SHEM-361 (361 groups, to 19.6 MeV)</option>
+            <option value="LLNL-616">LLNL-616 (616 groups, to 20 MeV)</option>
+            <option value="SCALE-999">SCALE-999 (999 groups, to 20 MeV)</option>
+            <option value="UKAEA-1102">UKAEA-1102 (1102 groups, to 1 GeV)</option>
+            <option value="ECCO-1968">ECCO-1968 (1968 groups, to 19.6 MeV)</option>
+          </select>
+        </label>
+        <label>
+          <span>Per-group flux: one value per group, whitespace or comma separated</span>
+          <textarea id="group-flux" spellcheck="false"
+                    placeholder="1.2e10 3.4e11 &hellip;"></textarea>
+        </label>
+        <div class="status" id="group-status"></div>
+      </div>
+
+      <p class="note">
+        The shape is normalised, so the magnitude comes from each pulse's flux
+        below.
+      </p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel" id="material-panel">
       <h2>Material</h2>
       <div class="tabs" role="tablist">
         <button role="tab" aria-selected="true" data-tab="pnnl">PNNL compendium</button>
@@ -306,58 +358,6 @@
 
     <!-- ---------------------------------------------------------------- -->
     <section class="panel">
-      <h2>Neutron spectrum</h2>
-      <div class="tabs" role="tablist">
-        <button role="tab" aria-selected="true" data-tab="preset">Preset</button>
-        <button role="tab" aria-selected="false" data-tab="groups">Group structure</button>
-      </div>
-
-      <div data-panel="preset">
-        <label>
-          <span>Shape</span>
-          <!-- Filled from src/spectra.js at boot: the presets are generated
-               data, and a list kept here would drift from it. -->
-          <select id="spectrum-preset"></select>
-        </label>
-      </div>
-
-      <div data-panel="groups" hidden>
-        <label>
-          <span>Boundaries</span>
-          <!-- The ten neutron structures the solver resolves by name, coarsest
-               first after the default. The two photon structures it also knows
-               (VITAMIN-J-42, CCFE-24-PHOTON) are deliberately absent: this is a
-               neutron spectrum, and a photon grid pasted into it would resolve
-               and solve and mean nothing. -->
-          <select id="group-structure">
-            <option value="CCFE-709">CCFE-709 (709 groups, 1e-5 eV to 1 GeV)</option>
-            <option value="XMAS-172">XMAS-172 (172 groups, to 19.6 MeV)</option>
-            <option value="VITAMIN-J-175">VITAMIN-J-175 (175 groups, to 19.6 MeV)</option>
-            <option value="SCALE-252">SCALE-252 (252 groups, to 20 MeV)</option>
-            <option value="TRIPOLI-315">TRIPOLI-315 (315 groups, to 19.6 MeV)</option>
-            <option value="SHEM-361">SHEM-361 (361 groups, to 19.6 MeV)</option>
-            <option value="LLNL-616">LLNL-616 (616 groups, to 20 MeV)</option>
-            <option value="SCALE-999">SCALE-999 (999 groups, to 20 MeV)</option>
-            <option value="UKAEA-1102">UKAEA-1102 (1102 groups, to 1 GeV)</option>
-            <option value="ECCO-1968">ECCO-1968 (1968 groups, to 19.6 MeV)</option>
-          </select>
-        </label>
-        <label>
-          <span>Per-group flux: one value per group, whitespace or comma separated</span>
-          <textarea id="group-flux" spellcheck="false"
-                    placeholder="1.2e10 3.4e11 &hellip;"></textarea>
-        </label>
-        <div class="status" id="group-status"></div>
-      </div>
-
-      <p class="note">
-        The shape is normalised, so the magnitude comes from each pulse's flux
-        below.
-      </p>
-    </section>
-
-    <!-- ---------------------------------------------------------------- -->
-    <section class="panel">
       <h2>Irradiation schedule</h2>
       <!-- Fixed columns, with the duration given the most room: it holds a
            number and a unit side by side, and a log-spaced step is "1.47 h"
@@ -413,10 +413,10 @@
       <div class="warn" id="warning" hidden></div>
     </section>
 
-    <!-- Before the run, not after it. The spectrum is an input, and the only
-         one whose consequences cannot be read off the form: a preset's name
-         does not say where its flux sits, and a pasted 709-group vector is
-         unreadable as numbers. Drawn on load and on every edit. -->
+    <!-- Before the run, not after it. The spectrum is an input, and one whose
+         consequences cannot be read off the form: a preset's name does not
+         say where its flux sits, and a pasted 709-group vector is unreadable
+         as numbers. Drawn on load and on every edit. -->
     <section class="panel">
       <!-- "Spectrum", not "Neutron spectrum": the input panel opposite already
            carries that name, and two panels with one name is a worse label than
@@ -424,6 +424,25 @@
       <h2>Spectrum</h2>
       <div class="plot-wrap"><div class="plot" id="plot-spectrum"></div></div>
       <div class="status" id="spectrum-status"></div>
+    </section>
+
+    <!-- Likewise the material as the solver builds it: an element expands
+         over its natural abundance, a formula parses to its atoms, and a
+         compendium name stands for thirty nuclides. Drawn on load and on every
+         edit. Once there are results, the inventory at any step sits right
+         under it, so the material before and the material after are two bar
+         charts a glance apart. -->
+    <section class="panel">
+      <h2>Material</h2>
+      <div class="plot-wrap"><div class="plot" id="plot-material"></div></div>
+      <div class="status" id="material-status"></div>
+      <div id="material-steps" hidden>
+        <div class="plot-wrap" style="margin-top:.75rem"><div class="plot" id="plot-inventory"></div></div>
+        <label style="margin-top:.5rem">
+          <span>Inventory at step <output id="inventory-step-label"></output></span>
+          <input id="inventory-step" type="range" min="0" max="0" value="0" step="1">
+        </label>
+      </div>
     </section>
 
     <section class="panel">
@@ -435,11 +454,6 @@
         <div class="plot-wrap"><div class="plot" id="plot-activity"></div></div>
         <div class="plot-wrap"><div class="plot" id="plot-heat"></div></div>
         <div class="plot-wrap"><div class="plot" id="plot-dose"></div></div>
-        <div class="plot-wrap"><div class="plot" id="plot-inventory"></div></div>
-        <label style="margin-top:.5rem">
-          <span>Inventory at step <output id="inventory-step-label"></output></span>
-          <input id="inventory-step" type="range" min="0" max="0" value="0" step="1">
-        </label>
         <div class="plot-wrap"><div class="plot" id="plot-photons"></div></div>
         <label style="margin-top:.5rem">
           <span>Photon spectrum at step <output id="photon-step-label"></output></span>

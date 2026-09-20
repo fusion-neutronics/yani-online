@@ -146,6 +146,7 @@ const CONFIG = { displayModeBar: false, responsive: true };
 /// "log" for a categorical axis is a control that does nothing, which is worse
 /// than no control.
 const AXES = {
+  "plot-material": ["x"],
   "plot-spectrum": ["x", "y"],
   "plot-activity": ["x", "y"],
   "plot-heat": ["x", "y"],
@@ -733,6 +734,53 @@ export function drawSpectrum(boundaries, values) {
       xaxis: { type: xType },
       yaxis: { type: yType, range: span(yType, floor, peak, 2) },
       layout: { showlegend: false, hovermode: "closest" },
+    },
+  ), CONFIG);
+}
+
+/// The material as the solver built it: one bar per nuclide, by atom fraction.
+///
+/// A bar chart for the same reason the inventory is one: this is a ranking at
+/// an instant, not a trend, and one hue because the bars are one measure. Log
+/// by default, because a material's make-up spans decades, Fe56 at 92% of the
+/// atoms and Fe58 at a quarter of a percent, and steel's trace elements four
+/// decades below its iron; on linear the small ones vanish, which is
+/// occasionally the view someone wants of the big ones, hence the toggle.
+/// Every nuclide is drawn, since the point is to see what the form expanded
+/// to, and the chart grows with the count rather than folding the tail into
+/// "Other": a trace isotope is exactly what a reader checking an activation
+/// wants to know is there.
+export function drawMaterial(material) {
+  const el = document.getElementById("plot-material");
+  if (!el) return;
+  const entries = material ? Object.entries(material.atoms_per_barn_cm).filter(([, v]) => v > 0) : [];
+  if (!entries.length) {
+    Plotly.purge(el);
+    return;
+  }
+  const m = mode();
+  const xType = scaleOf(el.id, "x");
+  const total = entries.reduce((n, [, v]) => n + v, 0);
+  const ranked = entries.sort((a, b) => a[1] - b[1]);
+  // Room for the bars: a line and a bit each, within a floor a short list
+  // still reads at and a ceiling past which the bars thin instead.
+  el.style.height = `${Math.min(48, Math.max(14, 1.4 * ranked.length + 5))}rem`;
+  Plotly.react(el, [{
+    type: "bar",
+    orientation: "h",
+    x: ranked.map(([, v]) => 100 * v / total),
+    y: ranked.map(([k]) => k),
+    customdata: ranked.map(([, v]) => v),
+    marker: { color: SERIES[m][0] },
+    hovertemplate: "%{y}: %{x:.4g}% of atoms, %{customdata:.3e} atom/barn-cm<extra></extra>",
+  }], baseLayout(
+    `Material as built: ${ranked.length} nuclide${ranked.length === 1 ? "" : "s"}`,
+    "atom fraction [%]",
+    "",
+    {
+      xaxis: { type: xType },
+      yaxis: { automargin: true, gridcolor: "rgba(0,0,0,0)" },
+      layout: { showlegend: false, margin: { l: 80, r: 24, t: 40, b: 48 } },
     },
   ), CONFIG);
 }

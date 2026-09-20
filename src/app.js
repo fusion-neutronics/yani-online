@@ -10,7 +10,7 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawInventory, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, planNuclide, rangeHeader } from "./ranges.js";
 import { SPECTRA } from "./spectra.js";
@@ -164,6 +164,9 @@ const state = {
     ...logSpacedCooldowns(1, 10 * 365.25 * 86400, 10),
   ],
   composition: [{ name: "Fe", fraction: 1.0 }],
+  // The material as the solver last built it, for the make-up chart: kept so a
+  // theme change can redraw it without another round trip.
+  material: null,
 };
 
 
@@ -248,6 +251,7 @@ class Solver {
   requiredMts() { return this.call("requiredMts"); }
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
+  materialJson() { return this.call("materialJson"); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
   loadChain() { return this.call("loadChain"); }
   reset() { return this.call("reset"); }
@@ -600,7 +604,7 @@ function activeTab(panel) {
 /// a rebuild is needed is exactly what the builders are passed.
 function materialSpec() {
   const volume = Number($("volume").value);
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   if (activeTab(materialPanel) === "pnnl") {
     const name = $("pnnl-select").value;
     if (!name) throw new Error("choose a material");
@@ -662,8 +666,7 @@ async function applyMaterial(solver) {
 }
 
 async function currentSpectrum() {
-  const panel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const panel = $("spectrum-panel");
   if (activeTab(panel) === "preset") {
     const preset = SPECTRA[$("spectrum-preset").value];
     const boundaries = await state.solver.groupStructure(preset.structure);
@@ -707,7 +710,7 @@ async function currentSchedule(solver) {
 /// resolves the name itself -- so this stays synchronous except where the
 /// spectrum tab makes it otherwise.
 async function currentSetup() {
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   const volume = Number($("volume").value);
   const material = activeTab(materialPanel) === "pnnl"
     ? { kind: "pnnl", name: $("pnnl-select").value, volume }
@@ -725,8 +728,7 @@ async function currentSetup() {
     throw new Error("the composition is empty");
   }
 
-  const panel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const panel = $("spectrum-panel");
   const preset = SPECTRA[$("spectrum-preset").value];
   // A preset goes out by its structure's name, as a pasted flux does, so the
   // script resolves the 710 boundaries itself rather than carrying them.
@@ -803,13 +805,20 @@ async function refreshBudget() {
   const token = ++budgetToken;
   try {
     await applyMaterial(state.solver);
-  } catch {
+  } catch (e) {
     if (token === budgetToken) {
       $("budget").textContent = "Choose a material to see what needs downloading.";
+      showMaterial(null, String(e.message || e));
     }
     return;
   }
   if (token !== budgetToken) return;
+  // The material as built, drawn beside the budget it decides. Asked of the
+  // solver rather than worked out here: "Fe" is four isotopes at natural
+  // abundance and "H2O" is five, and the expansion is the solver's to do.
+  const material = await state.solver.materialJson();
+  if (token !== budgetToken) return;
+  showMaterial(material);
   if (!state.chainLoaded) {
     $("budget").textContent = "Run to fetch the chain and see the nuclide count.";
     return;
@@ -824,6 +833,36 @@ async function refreshBudget() {
   $("budget").textContent = wanted.length
     ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
     : `${required.length} nuclides needed, all held.`;
+}
+
+/// Draw the material's make-up and say what it adds up to, or say why there
+/// is nothing to draw.
+///
+/// The chart is the consequence of the form that cannot be read off it: an
+/// element expands over its natural abundance and a formula parses to its
+/// atoms, and a compendium material is thirty nuclides behind one name. The
+/// line under it is the material's totals, which the form gives in parts and
+/// never adds up.
+function showMaterial(material, problem = null) {
+  state.material = material;
+  drawMaterial(material);
+  const status = $("material-status");
+  if (!material) {
+    status.textContent = problem ? `No material to show: ${problem}` : "";
+    return;
+  }
+  const densities = Object.values(material.atoms_per_barn_cm);
+  const total = densities.reduce((n, v) => n + v, 0);
+  const parts = [
+    `${densities.length} nuclide${densities.length === 1 ? "" : "s"}`,
+    `${material.density} ${material.density_units}`,
+    `${total.toPrecision(4)} atom/barn-cm in all`,
+  ];
+  if (material.volume) {
+    parts.push(`${material.volume} cm3`);
+    if (material.density_units === "g/cm3") parts.push(`${(material.density * material.volume).toPrecision(4)} g`);
+  }
+  status.textContent = parts.join(", ") + (material.name ? `, ${material.name}` : "");
 }
 
 /// The nuclides held for the library and temperature currently on the form.
@@ -915,6 +954,10 @@ async function ensureData() {
 function showResults() {
   $("results-empty").hidden = true;
   $("results").hidden = false;
+  // The inventory lives under the material's make-up rather than with the
+  // other results, so the two bar charts sit together; it is shown once there
+  // is a step to show.
+  $("material-steps").hidden = false;
   // The two stepped charts open on the last step, which is the answer most
   // runs are after: what is left, and what it emits, at the end.
   for (const id of ["photon-step", "inventory-step"]) {
@@ -967,6 +1010,7 @@ async function sessionDocument(session) {
   for (const el of doc.querySelectorAll('.axis-scale, #yani-session, style[id^="plotly"]')) el.remove();
   doc.querySelector("#results").hidden = true;
   doc.querySelector("#results-empty").hidden = false;
+  doc.querySelector("#material-steps").hidden = true;
   doc.querySelector("#warning").hidden = true;
   doc.querySelector("#progress").hidden = true;
   const payload = document.createElement("script");
@@ -994,7 +1038,7 @@ async function restoreSession(session) {
   }
   $("temperature").value = String(setup.temperature ?? 294);
 
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   if (setup.material.kind === "pnnl") {
     materialPanel.querySelector('[role="tab"][data-tab="pnnl"]').click();
     const select = $("pnnl-select");
@@ -1016,8 +1060,7 @@ async function restoreSession(session) {
   }
   $("volume").value = String(setup.material.volume);
 
-  const spectrumPanel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const spectrumPanel = $("spectrum-panel");
   if (setup.spectrum.preset && SPECTRA[setup.spectrum.preset]) {
     spectrumPanel.querySelector('[role="tab"][data-tab="preset"]').click();
     $("spectrum-preset").value = setup.spectrum.preset;
@@ -1233,6 +1276,9 @@ async function main() {
   $("group-structure").addEventListener("change", refreshSpectrum);
   $("group-flux").addEventListener("input", refreshSpectrum);
   refreshSpectrum();
+  // And the material, which on the compendium tab with nothing picked yet says
+  // so rather than drawing nothing silently.
+  refreshBudget();
 
   $("composition").addEventListener("input", (e) => {
     const { i, k } = e.target.dataset;
@@ -1323,6 +1369,7 @@ async function main() {
   // is exactly when someone is most likely to switch.
   window.addEventListener("yani:redraw", () => {
     refreshSpectrum();
+    drawMaterial(state.material);
     if (state.results) {
       drawAll(state.results);
       drawInventory(state.results, Number($("inventory-step").value));

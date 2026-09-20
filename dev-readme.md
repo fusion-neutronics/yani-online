@@ -502,7 +502,12 @@ the other alone.
 The inventory and the decay photon lines are one step at a time, each under a
 slider of its own, opening on the last step. The inventory names the fifteen
 largest atom densities at that step, on an x axis fixed from every step's
-fifteen, so a bar's length means the same thing at every step. The photon
+fifteen, so a bar's length means the same thing at every step. It sits in the
+material panel, right under the material as built, rather than among the other
+results: the material before and the material after are two bar charts a
+glance apart, which is what they are for. The columns put the spectrum ahead
+of the material on both sides, inputs on the left and their views on the
+right, with the results last. The photon
 plot's axes are fixed once per run the same way: the x range from every step's
 lines, the y range from the lowest floor to the strongest line over the run,
 each step drawing the lines within five decades of its own strongest. An axis
@@ -529,6 +534,20 @@ The chart hides itself when `vendor/CORE_COMMIT` names a solver that predates
 the field, rather than drawing empty axes -- a dose plot with nothing in it
 reads as a material that gives no dose, which is a different and more alarming
 claim than "this build cannot tell you".
+
+The material is drawn as the solver builds it, under the spectrum and above
+the results, before any run and on every edit of the form: one bar per nuclide by atom
+fraction, log by default because a make-up spans decades, with the atom
+density on hover and a line under it adding the material up (nuclides,
+density, total atom density, volume, mass). It is the consequence of the form
+that cannot be read off it: an element expands over its natural abundance, a
+formula parses to its atoms, and a compendium name stands for thirty nuclides.
+Every nuclide is drawn and the chart grows with the count rather than folding
+a tail into "Other", since a trace isotope is exactly what a reader checking an
+activation wants to know is there. The expansion is asked of the solver
+(`materialJson` on the session) rather than repeated in the page.
+`verify.mjs` requires natural iron to draw as its four isotopes adding to a
+hundred percent, a compendium pick to draw many, and Fe56 to draw as one.
 
 The spectrum can be pasted against any of the ten neutron group structures the
 solver resolves by name, which is what it lists rather than a subset of them.
