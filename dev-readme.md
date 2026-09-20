@@ -490,14 +490,14 @@ the same way. `verify.mjs` runs aluminium and requires the largest series at
 the first step and at the last to be named.
 
 Beside the count are two boxes, **total** and **by nuclide**, on every series
-chart. Activity and decay heat open by nuclide, because the question they
-answer is which product dominates and when; the contact dose opens on its
-total, because a dose is first a single number, whether the thing can be
-handled and after how long, and only then a question of what is driving it.
-Either box can be added to the other. The total is drawn in ink and dashed, so
-that it reads as the sum rather than as a nuclide or as "Other". `verify.mjs`
-moves the count both ways, adds the total and requires it to be the sum of the
-nuclides and "Other", and turns the nuclides off to leave the total alone.
+chart, and every chart opens with both drawn. The total is the first question
+each answers, how much, and for a dose whether the thing can be handled and
+after how long; the nuclides are the second, what is driving it and when. A
+reader wants both at a glance, and either box takes one away. The total is
+drawn in ink and dashed, so that it reads as the sum rather than as a nuclide
+or as "Other". `verify.mjs` moves the count both ways, requires the total to be
+the sum of the nuclides and "Other", and turns each box off in turn to leave
+the other alone.
 
 The inventory and the decay photon lines are one step at a time, each under a
 slider of its own, opening on the last step. The inventory names the fifteen
@@ -515,10 +515,10 @@ Plotly's `uirevision`; a new run or a scale toggle draws the axis afresh.
 The contact dose is the odd one of the three time series: it
 is intensive, so unlike activity and decay heat it does not scale with the
 volume on the form -- the semi-infinite slab estimate cancels the geometry, and
-a bigger lump of the same material reads the same at contact. It opens on the
-total rather than a per-nuclide breakdown, with the by-nuclide box to add it,
-because the first question a dose answers is whether the thing can be handled
-and only the second is what is driving it. Absorbed dose in air at a build-up
+a bigger lump of the same material reads the same at contact. It opens with
+its total and its breakdown both drawn, as the other two charts do: the first
+question a dose answers is whether the thing can be handled, and the second is
+what is driving it. Absorbed dose in air at a build-up
 factor of 2.0, which is what `Material.contact_dose()` defaults to in the wheel,
 so the page and a Python run of the same setup report the same number:
 2.711e4 Gy/h against 2.710833e4 for the Fe56 check, Mn56 in both.

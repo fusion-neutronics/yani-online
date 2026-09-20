@@ -157,16 +157,17 @@ const AXES = {
 /// What each series chart draws, the total, the nuclides that lead, or both,
 /// and how it opens.
 ///
-/// Activity and decay heat open by nuclide because the question they answer is
-/// which product dominates and when. A contact dose is first a single number
-/// -- whether the thing can be handled, and after how long -- and only then a
-/// question of what is driving it, so it opens on the total and the breakdown
-/// is a checkbox away. Every chart has both boxes, and the count of nuclides
-/// it names, above it beside the scale toggles.
+/// Every chart opens with both drawn. The total is the first question each
+/// answers -- how much, and for a dose whether the thing can be handled and
+/// after how long -- and the nuclides are the second, what is driving it and
+/// when; a reader wants both at a glance, and either box takes one away. The
+/// total is ink and dashed, so the two readings do not compete for a hue.
+/// Every chart has both boxes, and the count of nuclides it names, above it
+/// beside the scale toggles.
 const VIEWS = {
-  "plot-activity": { total: false, byNuclide: true },
-  "plot-heat": { total: false, byNuclide: true },
-  "plot-dose": { total: true, byNuclide: false },
+  "plot-activity": { total: true, byNuclide: true },
+  "plot-heat": { total: true, byNuclide: true },
+  "plot-dose": { total: true, byNuclide: true },
 };
 
 const views = new Map();
