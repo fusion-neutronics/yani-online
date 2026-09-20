@@ -76,6 +76,10 @@ const api = {
   durationsToSeconds: (steps) => steps.map((s) => durationToSeconds(s.value, s.unit)),
 
   pnnlMaterial: (name, volume) => session.pnnlMaterial(name, volume),
+  /// The material as the solver built it: every nuclide the composition
+  /// expanded to, with its atom density, and the density and volume it was
+  /// given. What the page draws as the material's make-up.
+  materialJson: () => JSON.parse(session.materialJson()),
   buildMaterial: (composition, density, densityUnits, fractionType, volume) =>
     session.buildMaterial(composition, density, densityUnits, fractionType, volume),
 

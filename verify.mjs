@@ -639,6 +639,42 @@ async function main() {
   if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
   else fail("no Worker was created -- the solve would block the UI");
 
+  // The material as built is drawn before any run, from the solver's own
+  // expansion of the form: natural iron is four isotopes, and their atom
+  // fractions add to a hundred. It follows the form, so a single nuclide is
+  // one bar, and a compendium material is many. The page opens on the
+  // compendium tab with nothing picked, where there is no material to draw
+  // and the line under the chart says so; the custom tab carries iron.
+  const materialBars = () => page.$eval("#plot-material", (el) => ({
+    names: el.data[0].y.slice(),
+    fractions: el.data[0].x.slice(),
+    title: el.layout.title.text,
+  }));
+  const unpicked = await page.textContent("#material-status");
+  if (/No material to show/.test(unpicked)) ok("with nothing picked, the material panel says so");
+  else fail(`the material line before a pick reads: ${unpicked}`);
+  await page.click('[data-tab="custom"]');
+  await page.waitForFunction(() => {
+    const el = document.getElementById("plot-material");
+    return el.data && el.data[0].y.length === 4;
+  }, null, { timeout: 10000 }).then(
+    () => ok("the material's make-up is drawn before any run"),
+    () => fail("the material chart did not draw natural iron"),
+  );
+  const iron = await materialBars();
+  eq([...iron.names].sort().join(","), "Fe54,Fe56,Fe57,Fe58", "natural iron expands to its four isotopes");
+  const ironTotal = iron.fractions.reduce((n, v) => n + v, 0);
+  if (Math.abs(ironTotal - 100) < 1e-6) ok("whose atom fractions add to a hundred");
+  else fail(`the atom fractions add to ${ironTotal}`);
+  eq(iron.title, "Material as built: 4 nuclides", "and the title counts them");
+  const ironStatus = await page.textContent("#material-status");
+  if (/4 nuclides, 7\.87 g\/cm3, .* atom\/barn-cm in all, 1000 cm3, 7870 g/.test(ironStatus)) {
+    ok("and the line under it adds the material up");
+  } else {
+    fail(`the material line reads: ${ironStatus}`);
+  }
+  await page.click('[data-tab="pnnl"]');
+
   // The spectrum is an input, so it is drawn before anything has been run and
   // before any nuclear data exists to draw it from. Checked here rather than
   // after the run, because after the run a plot that only ever appeared with
@@ -651,7 +687,7 @@ async function main() {
   // select that renders and changes nothing is the failure this is for. The
   // spectrum's is the one that works before a run.
   const flipped = await page.evaluate(async () => {
-    const select = document.querySelector(".axis-scale select");
+    const select = document.querySelector('.axis-scale[data-for="plot-spectrum"] select');
     select.value = "linear";
     select.dispatchEvent(new Event("change"));
     await new Promise((r) => setTimeout(r, 300));
@@ -695,6 +731,13 @@ async function main() {
   // A material first: with none chosen the export refuses, which is correct --
   // there is no setup to describe -- and is checked immediately after.
   await page.selectOption("#pnnl-select", { index: 0 });
+  await page.waitForFunction(() => {
+    const el = document.getElementById("plot-material");
+    return el.data && el.data[0].y.length > 4;
+  }, null, { timeout: 10000 }).then(
+    () => ok("a compendium material draws its many nuclides"),
+    () => fail("the material chart did not follow the compendium pick"),
+  );
   const [download] = await Promise.all([
     page.waitForEvent("download"),
     page.click("#download-python"),
@@ -779,6 +822,13 @@ async function main() {
   await page.fill('#composition input[data-k="name"]', "Fe56");
   await page.fill("#density", "7.874");
   await page.fill("#volume", "1000");
+  await page.waitForFunction(() => {
+    const el = document.getElementById("plot-material");
+    return el.data && el.data[0].y.length === 1 && el.data[0].y[0] === "Fe56";
+  }, null, { timeout: 10000 }).then(
+    () => ok("a single nuclide draws as one bar"),
+    () => fail("the material chart did not follow the composition to Fe56"),
+  );
 
   // Count frames while the run happens, and count separately those painted
   // while the solve is in flight. A solve on the main thread paints none: the

@@ -530,6 +530,20 @@ the field, rather than drawing empty axes -- a dose plot with nothing in it
 reads as a material that gives no dose, which is a different and more alarming
 claim than "this build cannot tell you".
 
+The material is drawn as the solver builds it, beside the budget it decides,
+before any run and on every edit of the form: one bar per nuclide by atom
+fraction, log by default because a make-up spans decades, with the atom
+density on hover and a line under it adding the material up (nuclides,
+density, total atom density, volume, mass). It is the consequence of the form
+that cannot be read off it: an element expands over its natural abundance, a
+formula parses to its atoms, and a compendium name stands for thirty nuclides.
+Every nuclide is drawn and the chart grows with the count rather than folding
+a tail into "Other", since a trace isotope is exactly what a reader checking an
+activation wants to know is there. The expansion is asked of the solver
+(`materialJson` on the session) rather than repeated in the page.
+`verify.mjs` requires natural iron to draw as its four isotopes adding to a
+hundred percent, a compendium pick to draw many, and Fe56 to draw as one.
+
 The spectrum can be pasted against any of the ten neutron group structures the
 solver resolves by name, which is what it lists rather than a subset of them.
 The two photon structures it also knows are deliberately not offered: this is a

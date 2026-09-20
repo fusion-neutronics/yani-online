@@ -413,10 +413,21 @@
       <div class="warn" id="warning" hidden></div>
     </section>
 
-    <!-- Before the run, not after it. The spectrum is an input, and the only
-         one whose consequences cannot be read off the form: a preset's name
-         does not say where its flux sits, and a pasted 709-group vector is
-         unreadable as numbers. Drawn on load and on every edit. -->
+    <!-- Before the run, not after it. The material as the solver builds it is
+         an input whose consequences cannot be read off the form: an element
+         expands over its natural abundance, a formula parses to its atoms, and
+         a compendium name stands for thirty nuclides. Drawn on load and on
+         every edit, beside the budget it decides. -->
+    <section class="panel">
+      <h2>Material</h2>
+      <div class="plot-wrap"><div class="plot" id="plot-material"></div></div>
+      <div class="status" id="material-status"></div>
+    </section>
+
+    <!-- Likewise the spectrum: an input, and one whose consequences cannot be
+         read off the form: a preset's name does not say where its flux sits,
+         and a pasted 709-group vector is unreadable as numbers. Drawn on load
+         and on every edit. -->
     <section class="panel">
       <!-- "Spectrum", not "Neutron spectrum": the input panel opposite already
            carries that name, and two panels with one name is a worse label than

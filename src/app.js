@@ -10,7 +10,7 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawInventory, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, planNuclide, rangeHeader } from "./ranges.js";
 import { SPECTRA } from "./spectra.js";
@@ -164,6 +164,9 @@ const state = {
     ...logSpacedCooldowns(1, 10 * 365.25 * 86400, 10),
   ],
   composition: [{ name: "Fe", fraction: 1.0 }],
+  // The material as the solver last built it, for the make-up chart: kept so a
+  // theme change can redraw it without another round trip.
+  material: null,
 };
 
 
@@ -248,6 +251,7 @@ class Solver {
   requiredMts() { return this.call("requiredMts"); }
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
+  materialJson() { return this.call("materialJson"); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
   loadChain() { return this.call("loadChain"); }
   reset() { return this.call("reset"); }
@@ -803,13 +807,20 @@ async function refreshBudget() {
   const token = ++budgetToken;
   try {
     await applyMaterial(state.solver);
-  } catch {
+  } catch (e) {
     if (token === budgetToken) {
       $("budget").textContent = "Choose a material to see what needs downloading.";
+      showMaterial(null, String(e.message || e));
     }
     return;
   }
   if (token !== budgetToken) return;
+  // The material as built, drawn beside the budget it decides. Asked of the
+  // solver rather than worked out here: "Fe" is four isotopes at natural
+  // abundance and "H2O" is five, and the expansion is the solver's to do.
+  const material = await state.solver.materialJson();
+  if (token !== budgetToken) return;
+  showMaterial(material);
   if (!state.chainLoaded) {
     $("budget").textContent = "Run to fetch the chain and see the nuclide count.";
     return;
@@ -824,6 +835,36 @@ async function refreshBudget() {
   $("budget").textContent = wanted.length
     ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
     : `${required.length} nuclides needed, all held.`;
+}
+
+/// Draw the material's make-up and say what it adds up to, or say why there
+/// is nothing to draw.
+///
+/// The chart is the consequence of the form that cannot be read off it: an
+/// element expands over its natural abundance and a formula parses to its
+/// atoms, and a compendium material is thirty nuclides behind one name. The
+/// line under it is the material's totals, which the form gives in parts and
+/// never adds up.
+function showMaterial(material, problem = null) {
+  state.material = material;
+  drawMaterial(material);
+  const status = $("material-status");
+  if (!material) {
+    status.textContent = problem ? `No material to show: ${problem}` : "";
+    return;
+  }
+  const densities = Object.values(material.atoms_per_barn_cm);
+  const total = densities.reduce((n, v) => n + v, 0);
+  const parts = [
+    `${densities.length} nuclide${densities.length === 1 ? "" : "s"}`,
+    `${material.density} ${material.density_units}`,
+    `${total.toPrecision(4)} atom/barn-cm in all`,
+  ];
+  if (material.volume) {
+    parts.push(`${material.volume} cm3`);
+    if (material.density_units === "g/cm3") parts.push(`${(material.density * material.volume).toPrecision(4)} g`);
+  }
+  status.textContent = parts.join(", ") + (material.name ? `, ${material.name}` : "");
 }
 
 /// The nuclides held for the library and temperature currently on the form.
@@ -1233,6 +1274,9 @@ async function main() {
   $("group-structure").addEventListener("change", refreshSpectrum);
   $("group-flux").addEventListener("input", refreshSpectrum);
   refreshSpectrum();
+  // And the material, which on the compendium tab with nothing picked yet says
+  // so rather than drawing nothing silently.
+  refreshBudget();
 
   $("composition").addEventListener("input", (e) => {
     const { i, k } = e.target.dataset;
@@ -1323,6 +1367,7 @@ async function main() {
   // is exactly when someone is most likely to switch.
   window.addEventListener("yani:redraw", () => {
     refreshSpectrum();
+    drawMaterial(state.material);
     if (state.results) {
       drawAll(state.results);
       drawInventory(state.results, Number($("inventory-step").value));
