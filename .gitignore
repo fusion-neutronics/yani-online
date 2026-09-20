@@ -10,3 +10,5 @@ node_modules/
 
 # Screenshots from the verification pass.
 *.png
+# The file verify.mjs exports and reopens, a few MB of page and results.
+verify-session.html

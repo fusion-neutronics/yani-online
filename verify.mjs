@@ -1282,6 +1282,60 @@ async function main() {
   if (fetched() === beforeSettled) ok("and a run after that refetches nothing again");
   else fail(`a run after the chain change made ${fetched() - beforeSettled} requests`);
 
+  // The session export. The file it writes is this page with the setup and
+  // the results inside it, so the check is to open that file in a fresh page
+  // with the data origin unreachable and find the run there: the same peak,
+  // the same schedule, the same material, and no request for data.
+  const [sessionDownload] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#export"),
+  ]);
+  const sessionPath = `${process.cwd()}/verify-session.html`;
+  await sessionDownload.saveAs(sessionPath);
+  const sessionBytes = (await readFile(sessionPath)).length;
+  if (/^yani_session_.*\.html$/.test(sessionDownload.suggestedFilename())) {
+    ok(`the session exports as one file (${(sessionBytes / 1048576).toFixed(2)} MB)`);
+  } else {
+    fail(`the session export is named ${sessionDownload.suggestedFilename()}`);
+  }
+  const sessionPage = await browser.newPage({ viewport: { width: 1400, height: 1600 } });
+  let fetchedOffline = 0;
+  await sessionPage.route(`${ORIGIN}/**`, async (route) => {
+    fetchedOffline++;
+    await route.abort();
+  });
+  const restoredErrors = [];
+  sessionPage.on("pageerror", (e) => restoredErrors.push(e.message));
+  await sessionPage.goto(`file://${sessionPath}`);
+  await sessionPage.waitForFunction(
+    () => document.getElementById("status").textContent.startsWith("Restored"),
+    null, { timeout: 60000 },
+  ).then(
+    () => ok("the exported file opens on the saved session"),
+    () => fail("the exported file did not restore its session"),
+  );
+  await sessionPage.waitForTimeout(500);
+  const restoredPeak = await sessionPage.$eval("#plot-activity", (el) =>
+    Math.max(...el.data.flatMap((t) => t.y.filter((v) => v != null))));
+  if (restoredPeak === base) ok("with the run's results on the charts, to the last digit");
+  else fail(`the sessionPage activity is ${restoredPeak} against ${base}`);
+  const restoredForm = await sessionPage.evaluate(() => ({
+    material: document.querySelector('#composition input[data-k="name"]').value,
+    rows: document.querySelectorAll("#schedule tr").length,
+    temperature: document.getElementById("temperature").value,
+    preset: document.getElementById("spectrum-preset").value,
+    inventorySteps: Number(document.getElementById("inventory-step").max) + 1,
+  }));
+  eq(restoredForm.material, "Fe56", "and the material back on the form");
+  eq(restoredForm.rows, schedule.length, "and the schedule");
+  eq(restoredForm.temperature, "294", "and the temperature");
+  eq(restoredForm.preset, offered[0], "and the spectrum preset");
+  eq(restoredForm.inventorySteps, schedule.length, "and the stepped charts sized to the run");
+  eq(fetchedOffline, 0, "with nothing fetched from the data origin");
+  if (restoredErrors.length) fail(`the exported file raised: ${restoredErrors.slice(0, 3).join(" | ")}`);
+  else ok("and no errors in the exported file");
+  await sessionPage.close();
+
   await page.screenshot({ path: "verify-light.png", fullPage: true });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.click("#run");
