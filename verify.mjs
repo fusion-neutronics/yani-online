@@ -639,6 +639,25 @@ async function main() {
   if (workers.length) ok(`the solver runs in a Worker (${workers[0].url().slice(0, 22)}…)`);
   else fail("no Worker was created -- the solve would block the UI");
 
+  // The layout: the spectrum ahead of the material in both columns, and the
+  // inventory under the material's make-up rather than among the results, so
+  // the material before and the material after are two bar charts a glance
+  // apart. Checked by document order, which is what a reader scrolls.
+  const layout = await page.evaluate(() => {
+    const before = (a, b) => Boolean(document.getElementById(a).compareDocumentPosition(document.getElementById(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const panel = (id) => document.getElementById(id).closest(".panel");
+    return {
+      inputsOrdered: before("spectrum-panel", "material-panel"),
+      viewsOrdered: before("plot-spectrum", "plot-material"),
+      inventoryWithMaterial: panel("plot-inventory") === panel("plot-material") && before("plot-material", "plot-inventory"),
+      inventoryHidden: document.getElementById("material-steps").hidden,
+    };
+  });
+  eq(layout.inputsOrdered, true, "the spectrum inputs come before the material inputs");
+  eq(layout.viewsOrdered, true, "and the spectrum plot before the material plot");
+  eq(layout.inventoryWithMaterial, true, "the inventory sits under the material's make-up");
+  eq(layout.inventoryHidden, true, "and is hidden until there are results");
+
   // The material as built is drawn before any run, from the solver's own
   // expansion of the form: natural iron is four isotopes, and their atom
   // fractions add to a hundred. It follows the form, so a single nuclide is
@@ -1022,6 +1041,7 @@ async function main() {
     }, i);
     await page.waitForTimeout(250);
   };
+  eq(await page.$eval("#material-steps", (el) => el.hidden), false, "the inventory is shown once there are results");
   const inventorySteps = await page.$eval("#inventory-step", (el) => Number(el.max) + 1);
   eq(inventorySteps, schedule.length, "the inventory slider has a step per result");
   const lastInventory = await inventory();

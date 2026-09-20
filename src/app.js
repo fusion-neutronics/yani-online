@@ -604,7 +604,7 @@ function activeTab(panel) {
 /// a rebuild is needed is exactly what the builders are passed.
 function materialSpec() {
   const volume = Number($("volume").value);
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   if (activeTab(materialPanel) === "pnnl") {
     const name = $("pnnl-select").value;
     if (!name) throw new Error("choose a material");
@@ -666,8 +666,7 @@ async function applyMaterial(solver) {
 }
 
 async function currentSpectrum() {
-  const panel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const panel = $("spectrum-panel");
   if (activeTab(panel) === "preset") {
     const preset = SPECTRA[$("spectrum-preset").value];
     const boundaries = await state.solver.groupStructure(preset.structure);
@@ -711,7 +710,7 @@ async function currentSchedule(solver) {
 /// resolves the name itself -- so this stays synchronous except where the
 /// spectrum tab makes it otherwise.
 async function currentSetup() {
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   const volume = Number($("volume").value);
   const material = activeTab(materialPanel) === "pnnl"
     ? { kind: "pnnl", name: $("pnnl-select").value, volume }
@@ -729,8 +728,7 @@ async function currentSetup() {
     throw new Error("the composition is empty");
   }
 
-  const panel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const panel = $("spectrum-panel");
   const preset = SPECTRA[$("spectrum-preset").value];
   // A preset goes out by its structure's name, as a pasted flux does, so the
   // script resolves the 710 boundaries itself rather than carrying them.
@@ -956,6 +954,10 @@ async function ensureData() {
 function showResults() {
   $("results-empty").hidden = true;
   $("results").hidden = false;
+  // The inventory lives under the material's make-up rather than with the
+  // other results, so the two bar charts sit together; it is shown once there
+  // is a step to show.
+  $("material-steps").hidden = false;
   // The two stepped charts open on the last step, which is the answer most
   // runs are after: what is left, and what it emits, at the end.
   for (const id of ["photon-step", "inventory-step"]) {
@@ -1008,6 +1010,7 @@ async function sessionDocument(session) {
   for (const el of doc.querySelectorAll('.axis-scale, #yani-session, style[id^="plotly"]')) el.remove();
   doc.querySelector("#results").hidden = true;
   doc.querySelector("#results-empty").hidden = false;
+  doc.querySelector("#material-steps").hidden = true;
   doc.querySelector("#warning").hidden = true;
   doc.querySelector("#progress").hidden = true;
   const payload = document.createElement("script");
@@ -1035,7 +1038,7 @@ async function restoreSession(session) {
   }
   $("temperature").value = String(setup.temperature ?? 294);
 
-  const materialPanel = document.querySelector(".panel");
+  const materialPanel = $("material-panel");
   if (setup.material.kind === "pnnl") {
     materialPanel.querySelector('[role="tab"][data-tab="pnnl"]').click();
     const select = $("pnnl-select");
@@ -1057,8 +1060,7 @@ async function restoreSession(session) {
   }
   $("volume").value = String(setup.material.volume);
 
-  const spectrumPanel = [...document.querySelectorAll(".panel")].find((p) =>
-    p.querySelector("#spectrum-preset, #group-structure"));
+  const spectrumPanel = $("spectrum-panel");
   if (setup.spectrum.preset && SPECTRA[setup.spectrum.preset]) {
     spectrumPanel.querySelector('[role="tab"][data-tab="preset"]').click();
     $("spectrum-preset").value = setup.spectrum.preset;
