@@ -900,7 +900,7 @@ async function main() {
   const opening = await drawn();
   eq(namedCount(opening), 4, "a series chart opens naming four nuclides");
   eq(opening.names.includes("Other"), true, "with the rest as Other");
-  eq(opening.names.includes("total"), false, "and no total");
+  eq(opening.names.includes("total"), true, "and the total drawn with them");
   await page.selectOption(control("named"), "2");
   await page.waitForTimeout(300);
   eq(namedCount(await drawn()), 2, "the count control names fewer");
@@ -909,7 +909,6 @@ async function main() {
   const eight = await drawn();
   eq(namedCount(eight) >= 5 && namedCount(eight) <= 8, true, `and more (${namedCount(eight)} at eight)`);
   await page.selectOption(control("named"), "4");
-  await page.check(control("total"));
   await page.waitForTimeout(300);
   const withTotal = await drawn();
   // Summed from the drawn traces, which the log floor has cut six decades
@@ -917,9 +916,9 @@ async function main() {
   // total: within a hundred thousandth is the floor's dust and no more.
   const summed = withTotal.names.filter((n) => n !== "total").reduce((n, k) => n + (withTotal.first[k] || 0), 0);
   if (withTotal.names.includes("total") && Math.abs(withTotal.first.total / summed - 1) < 1e-5) {
-    ok("the total box adds a total that is the sum of the nuclides and Other");
+    ok("the total is the sum of the nuclides and Other");
   } else {
-    fail(`the total box drew ${withTotal.names.join(", ")}, total ${withTotal.first.total} against a sum of ${summed}`);
+    fail(`the chart drew ${withTotal.names.join(", ")}, total ${withTotal.first.total} against a sum of ${summed}`);
   }
   await page.uncheck(control("byNuclide"));
   await page.waitForTimeout(300);
@@ -927,7 +926,11 @@ async function main() {
   await page.check(control("byNuclide"));
   await page.uncheck(control("total"));
   await page.waitForTimeout(300);
-  eq(namedCount(await drawn()), 4, "and the chart comes back as it opened");
+  const nuclidesOnly = await drawn();
+  eq(namedCount(nuclidesOnly) === 4 && !nuclidesOnly.names.includes("total"), true, "the total box off leaves the nuclides alone");
+  await page.check(control("total"));
+  await page.waitForTimeout(300);
+  eq((await drawn()).names.includes("total") && namedCount(await drawn()) === 4, true, "and the chart comes back as it opened");
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching
@@ -1204,7 +1207,10 @@ async function main() {
   await page.fill('#composition input[data-k="name"]', "Al27");
   await solve();
   const leaders = await page.$eval("#plot-activity", (el) => {
+    // The total is drawn too, and is by construction the largest; the
+    // question is which nuclide series leads, so it is left out here.
     const at = (i) => el.data
+      .filter((t) => t.name !== "total")
       .map((t) => [t.name, t.y[i]])
       .filter(([, v]) => v != null)
       .sort((a, b) => b[1] - a[1])[0];
