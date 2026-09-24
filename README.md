@@ -36,3 +36,16 @@ with the same plots.
 See [dev-readme.md](dev-readme.md) for how the page is built and vendored, where
 the solve runs, what each browser engine does, and where the nuclear data comes
 from.
+
+## Licence
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+The vendored solver in `vendor/` is built from
+[fusion-neutronics/core](https://github.com/fusion-neutronics/core) and carries
+the same dual licence.

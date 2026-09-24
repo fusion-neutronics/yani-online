@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Browser build of YANI: transmutation and activation, solved client-side",
+  "license": "MIT OR Apache-2.0",
   "scripts": {
     "build": "node build.mjs",
     "verify": "node verify.mjs"
