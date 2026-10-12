@@ -11,7 +11,26 @@
 
   Panels are ordered the way a calculation is: what is being irradiated, what
   data describes it, what the neutrons look like, for how long, then run.
+
+  The Python tab is the other way in: an editor that runs yani scripts on
+  Pyodide. None of it is in this file. app.js imports script.js, which sits
+  beside the page, the first time the tab is opened, and that is what loads
+  CodeMirror, Pyodide and the yani-core wheel; until then the form is all
+  there is. So it needs the page served over http(s), not opened from a file.
 -->
+
+<script>
+  // Cross-origin isolation for GitHub Pages, which cannot set COOP/COEP
+  // headers: coi-serviceworker installs a service worker that adds them and
+  // reloads once. The Python tab needs it for its batched data fetch and for
+  // Stop to interrupt Python; the form does not mind either way. Only over
+  // http(s): from a file there is no service worker and no Python tab.
+  if (/^https?:$/.test(location.protocol)) {
+    const coi = document.createElement("script");
+    coi.src = "coi-serviceworker.min.js";
+    document.head.append(coi);
+  }
+</script>
 
 <style>
   /* Light values on :root so the palette exists unconditionally; the dark
@@ -25,7 +44,15 @@
     --accent: #2f5fd0;
     --warn: #9a5b00;
     --warn-bg: #fff5e5;
+    --err: #b3261e;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /* The Python editor's syntax colours. */
+    --tok-keyword: #8a3ab9;
+    --tok-string: #1f7a3a;
+    --tok-number: #a55a00;
+    --tok-comment: #6b7280;
+    --tok-def: #2f5fd0;
+    --tok-builtin: #0f7c8c;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -37,6 +64,13 @@
       --accent: #7aa2f7;
       --warn: #e0a458;
       --warn-bg: #2a2317;
+      --err: #f28b82;
+      --tok-keyword: #c792ea;
+      --tok-string: #a5d6a7;
+      --tok-number: #f0b36b;
+      --tok-comment: #7f8896;
+      --tok-def: #82aaff;
+      --tok-builtin: #6cd4e0;
     }
   }
   :root[data-theme="dark"] {
@@ -48,6 +82,13 @@
     --accent: #7aa2f7;
     --warn: #e0a458;
     --warn-bg: #2a2317;
+    --err: #f28b82;
+    --tok-keyword: #c792ea;
+    --tok-string: #a5d6a7;
+    --tok-number: #f0b36b;
+    --tok-comment: #7f8896;
+    --tok-def: #82aaff;
+    --tok-builtin: #6cd4e0;
   }
 
   * { box-sizing: border-box; }
@@ -188,6 +229,114 @@
   }
   .axis-scale label > span { display: inline; margin: 0; text-transform: uppercase; white-space: nowrap; }
   .axis-scale select { width: auto; padding: .05rem .25rem; font-size: .75rem; }
+
+  /* Form or Python: the two ways in, one above the other's content. */
+  .modes { max-width: 78rem; margin: 0 auto 1rem; display: flex; gap: .25rem; border-bottom: 1px solid var(--line); }
+  .modes button {
+    width: auto;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    font-weight: 500;
+    padding: .4rem .9rem;
+    margin-bottom: -1px;
+  }
+  .modes button[aria-selected="true"] { color: var(--ink); background: var(--panel); border-color: var(--line); }
+
+  /* The Python editor. Everything is scoped under #script-mode, since the
+     form's rules for buttons and selects (full width, filled) are not what a
+     toolbar wants. */
+  #script-mode {
+    max-width: 78rem;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 1rem;
+    height: calc(100vh - 9rem);
+    min-height: 32rem;
+  }
+  @media (max-width: 60rem) {
+    #script-mode { grid-template-columns: 1fr; height: auto; }
+    #script-mode .pane { min-height: 32rem; }
+  }
+  #script-mode .pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #script-mode .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem;
+    align-items: center;
+    padding: .5rem;
+    border-bottom: 1px solid var(--line);
+  }
+  #script-mode .toolbar .spacer { flex: 1; }
+  #script-mode select, #script-mode button {
+    width: auto;
+    font-size: .85rem;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: .3rem .6rem;
+    font-weight: 400;
+  }
+  #script-mode button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+  #script-mode kbd { font-family: var(--mono); font-size: .75em; opacity: .8; }
+  #py-editor { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+  #py-editor .cm-editor { height: 100%; }
+  #script-mode .py-status {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--muted);
+    padding: .3rem .6rem;
+    border-top: 1px solid var(--line);
+    min-height: 1.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #script-mode .tabs { margin: 0; }
+  #script-mode .tabs button { background: transparent; border-color: transparent; color: var(--muted); font-weight: 500; }
+  #script-mode .tabs button[aria-selected="true"] { color: var(--ink); background: var(--bg); border-color: var(--line); }
+  #script-mode .tabs .count { font-size: .75em; color: var(--muted); margin-left: .2rem; }
+  #script-mode .tab-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+  #py-output {
+    margin: 0;
+    padding: .6rem .75rem;
+    font: .8rem/1.45 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #py-output .stderr { color: var(--err); }
+  #py-output .note { color: var(--muted); font-style: italic; }
+  #py-plots { padding: .75rem; }
+  #py-plots figure { margin: 0 0 1rem; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  #py-plots figcaption {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: .8rem;
+    color: var(--muted);
+    padding: .3rem .6rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  #py-plots figcaption button { font-size: .75rem; padding: .1rem .45rem; }
+  #py-plots iframe { display: block; width: 100%; height: 30rem; max-height: 30rem; border: 0; background: #fff; }
+  #script-mode .empty { color: var(--muted); font-size: .88rem; padding: 1rem; }
+  #py-data { padding: .75rem; font-size: .85rem; }
+  #py-data p { margin: 0 0 .6rem; }
+  #py-data table { margin-bottom: .75rem; }
+  #script-unavailable { max-width: 78rem; margin: 0 auto; }
 </style>
 
 <header>
@@ -204,7 +353,12 @@
   </p>
 </header>
 
-<main>
+<nav class="modes" role="tablist" aria-label="Mode">
+  <button role="tab" aria-selected="true" data-mode="form">Form</button>
+  <button role="tab" aria-selected="false" data-mode="python" title="Write and run yani Python in the browser">Python</button>
+</nav>
+
+<main id="form-mode">
   <!-- ------------------------------------------------------------------ -->
   <div>
     <section class="panel" id="spectrum-panel">
@@ -403,11 +557,12 @@
       </div>
       <div class="inline" style="margin-top:.5rem">
         <button class="secondary" id="download-python">Download this setup as Python</button>
+        <button class="secondary" id="open-python">Open it in the Python tab</button>
       </div>
       <p class="note">
         The same material, data, spectrum and schedule as a yani script, with
-        the plots. It needs no run first &mdash; the setup is the thing it
-        carries.
+        the plots. It needs no run first: the setup is the thing it
+        carries. The Python tab runs it here, and is the place to change it.
       </p>
       <div class="status" id="status" style="margin-top:.5rem"></div>
       <div class="warn" id="warning" hidden></div>
@@ -471,6 +626,36 @@
     </section>
   </div>
 </main>
+
+<!-- The Python editor. Static markup with nothing in it: script.js fills it
+     the first time the tab is opened, and the session export empties it
+     again. Ids are prefixed py- so none can collide with the form's. -->
+<div id="script-mode" hidden>
+  <section class="pane" aria-label="Editor">
+    <div class="toolbar">
+      <select id="py-example" aria-label="Example"></select>
+      <button id="py-run" class="primary" title="Run (Ctrl+Enter)">Run <kbd>Ctrl+Enter</kbd></button>
+      <button id="py-stop" disabled>Stop</button>
+      <span class="spacer"></span>
+      <button id="py-share" title="Copy a link that opens this code">Share</button>
+      <button id="py-download" title="Save the script to run with pip install yani">Download .py</button>
+    </div>
+    <div id="py-editor"></div>
+    <div class="py-status" id="py-status" role="status">Starting</div>
+  </section>
+
+  <section class="pane" aria-label="Results">
+    <div class="toolbar tabs" role="tablist">
+      <button role="tab" data-pytab="output" aria-selected="true">Output</button>
+      <button role="tab" data-pytab="plots" aria-selected="false">Plots<span class="count" id="py-plot-count"></span></button>
+      <button role="tab" data-pytab="data" aria-selected="false">Data</button>
+    </div>
+    <div class="tab-body" data-pypanel="output"><pre id="py-output"></pre></div>
+    <div class="tab-body" data-pypanel="plots" hidden><div id="py-plots"></div></div>
+    <div class="tab-body" data-pypanel="data" hidden><div id="py-data"></div></div>
+  </section>
+</div>
+<div id="script-unavailable" class="warn" hidden></div>
 
 <script type="module">
 // The build replaces these with the payloads; in the dev tree they are fetched

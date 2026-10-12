@@ -12,3 +12,6 @@ node_modules/
 *.png
 # The file verify.mjs exports and reopens, a few MB of page and results.
 verify-session.html
+
+# Data downloaded by scripts/fetch-fixtures.mjs for the Python tab checks.
+.fixtures/

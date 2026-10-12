@@ -11,10 +11,14 @@
 // `--live` adds a check against the real data origin: that the published
 // byte-range indexes describe the published objects, that ranges are honoured,
 // and that a stream spliced at one temperature is byte-for-byte the whole
-// file's bytes. It is the only part that needs the network.
+// file's bytes; and runs the Python tab's iron example against the published
+// release. It is the only part that needs the network, apart from the Python
+// tab's Pyodide (from its CDN) and yani-core and plotly (from PyPI).
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
+// The Python tab's checks read those too, or what `node
+// scripts/fetch-fixtures.mjs` downloads into .fixtures/ (see serve.mjs).
 
 import { chromium } from "playwright";
 import { readFile, writeFile } from "node:fs/promises";
@@ -26,6 +30,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SPECTRA } from "./src/spectra.js";
+import { serve, FETCHED_FIXTURES } from "./serve.mjs";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
 // a sibling checkout, which is where they land after
@@ -628,9 +633,20 @@ async function main() {
     });
   });
 
+  const bootStarted = Date.now();
   await page.goto(`file://${process.cwd()}/dist/index.html`);
   await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
-  ok("page boots and the solver starts");
+  ok(`page boots and the solver starts (${Date.now() - bootStarted} ms from file://)`);
+
+  // The Python tab is not in the one file: from a file it says where it does
+  // work, and asks for nothing.
+  await page.click('.modes [data-mode="python"]');
+  const unavailable = await page.$eval("#script-unavailable", (el) => !el.hidden && el.textContent);
+  if (unavailable && /served over http/.test(unavailable)) ok("from a file, the Python tab says it needs http(s)");
+  else fail(`the Python tab from a file shows: ${unavailable || "nothing"}`);
+  eq(await page.$eval("#form-mode", (el) => el.hidden), true, "and the form is out of the way");
+  await page.click('.modes [data-mode="form"]');
+  eq(await page.$eval("#form-mode", (el) => el.hidden), false, "the Form tab brings the form back");
 
   // Where the solver started, which is the whole point of the worker: a page
   // that boots and answers is not evidence of anything if it is answering from
@@ -1424,7 +1440,275 @@ async function main() {
   if (errors.length) fail(`console errors: ${errors.slice(0, 5).join(" | ")}`);
   else ok("no console errors");
 
+  await checkPythonTab(browser);
+
   await browser.close();
+}
+
+// --- the Python tab --------------------------------------------------------
+
+const PYODIDE_CDN = "https://cdn.jsdelivr.net/";
+// Where yani-core comes from when the page installs the PyPI release, and
+// where micropip finds plotly, which Pyodide does not carry.
+const PYPI = ["https://pypi.org/", "https://files.pythonhosted.org/"];
+const RUN_TIMEOUT = 600_000;
+
+/// The Python tab, served over http as GitHub Pages serves it, with the
+/// fixtures as a data release beside it (serve.mjs).
+///
+/// What it covers: that the form starts without loading any of it, and that
+/// the first open of the tab is what does; the iron example's activity and
+/// decay heat, its plot, the batched download and its counter; a rerun that
+/// fetches nothing; the form's setup opened in the editor and run, with all
+/// of its figures drawn; tracebacks, Stop, and share links; and that nothing
+/// but Pyodide's CDN and PyPI is asked for from another origin.
+async function checkPythonTab(browser) {
+  const { WHEEL, YANI_CORE_VERSION } = await import("./dist/config.js");
+  const fixtureRoots = [FIXTURES, FETCHED_FIXTURES];
+  const haveIron = fixtureRoots.some((d) => existsSync(`${d}/Fe56.arrow/version.json`))
+    && fixtureRoots.some((d) => existsSync(`${d}/transmutation-endf-b8.1-sfr.arrow/decay`) || existsSync(`${d}/transmutation/decay.arrow`));
+
+  const server = await serve({ port: 0 });
+  const base = `http://127.0.0.1:${server.address().port}/`;
+  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(`PAGEERROR ${e.message}`));
+  // Every request the page, its workers and its frames make, in order.
+  const requests = [];
+  context.on("request", (r) => requests.push(r.url()));
+  const offOrigin = () => requests.filter((u) => !u.startsWith(base) && !/^(data|blob|about):/.test(u));
+  const app = (fn, arg) => page.evaluate(fn, arg);
+  const output = () => page.textContent("#py-output");
+  const status = () => page.textContent("#py-status");
+  const waitReady = () => page.waitForFunction(() => window.yaniScript && window.yaniScript.state === "ready", null, { timeout: RUN_TIMEOUT });
+  const runCode = async (code) => {
+    await app((c) => { window.yaniScript.setCode(c); window.yaniScript.run(); }, code);
+    await page.waitForFunction(() => window.yaniScript.state !== "running"
+      && /^(Finished|Failed)/.test(document.getElementById("py-status").textContent), null, { timeout: RUN_TIMEOUT });
+    return output();
+  };
+
+  try {
+    // -- The form starts as it did ------------------------------------------
+    // Pyodide, CodeMirror and the wheel are the Python tab's, and a visitor
+    // who never opens it should not wait for, or download, any of them.
+    const started = Date.now();
+    await page.goto(`${base}?data=/fixtures/`);
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 60000 });
+    const formMs = Date.now() - started;
+    ok(`over http, the form is ready in ${formMs} ms`);
+    eq(await app(() => self.crossOriginIsolated), true, "the page is cross-origin isolated");
+    await page.waitForTimeout(1000);
+    const early = requests.filter((u) => /\/(script|script-worker|fetcher|codemirror|config)\.js$|\.whl$/.test(u) || u.startsWith(PYODIDE_CDN) || PYPI.some((p) => u.startsWith(p)));
+    eq(early.length, 0, "nothing of the Python tab is fetched before it is opened");
+
+    // -- The first open ------------------------------------------------------
+    const opened = Date.now();
+    await page.click('.modes [data-mode="python"]');
+    await waitReady();
+    const openSeconds = (Date.now() - opened) / 1000;
+    const booted = await status();
+    ok(`the Python tab's first open starts Python in ${openSeconds.toFixed(1)} s: ${booted}`);
+    eq(await page.$eval("#form-mode", (el) => el.hidden), true, "and hides the form");
+    if (WHEEL) ok(`installed yani-core from ${WHEEL}, not PyPI`);
+    else eq(booted.includes(`yani ${YANI_CORE_VERSION} `), true, `installed yani-core ${YANI_CORE_VERSION} from PyPI`);
+    const titles = await app(() => [...document.getElementById("py-example").options].map((o) => o.text));
+    eq(titles.join("|"), "Iron activation|Lithium breeding", "the examples menu");
+    eq((await app(() => window.yaniScript.code())).startsWith("# Iron activation:"), true, "the editor opens on the iron example");
+
+    // Completion of the yani API, from what the wheel has.
+    await page.click("#py-editor .cm-content");
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type("\nyani.PulseSch");
+    const completion = page.locator(".cm-tooltip-autocomplete").first();
+    await completion.waitFor({ timeout: 10_000 }).then(
+      async () => eq((await completion.textContent()).includes("PulseSchedule"), true, "the editor completes yani's names"),
+      () => fail("no completion list for yani."),
+    );
+    await page.keyboard.press("Escape");
+    const examples = await app(() => {
+      const select = document.getElementById("py-example");
+      const out = {};
+      for (const o of select.options) {
+        window.confirm = () => true;
+        select.value = o.value;
+        select.dispatchEvent(new Event("change"));
+        out[o.text] = window.yaniScript.code();
+      }
+      return out;
+    });
+
+    if (!haveIron) {
+      console.log(`note  no Fe56 and chain fixtures under ${FIXTURES} or ${FETCHED_FIXTURES}: skipping the Python runs`);
+      console.log("note  run node scripts/fetch-fixtures.mjs, or set YANI_FIXTURES");
+    } else {
+      // -- The iron example ------------------------------------------------
+      // One click, as a first visitor would.
+      await app((c) => window.yaniScript.setCode(c), examples["Iron activation"]);
+      const ran = Date.now();
+      await page.click("#py-run");
+      await page.waitForFunction(() => window.yaniScript.state === "ready"
+        && /^(Finished|Failed)/.test(document.getElementById("py-status").textContent), null, { timeout: RUN_TIMEOUT });
+      let out = await output();
+      const runStatus = await status();
+      ok(`the iron example: ${runStatus} (${((Date.now() - ran) / 1000).toFixed(1)} s)`);
+      const rows = out.split("\n").filter((l) => /^\s*\d\.\d{3}e[+-]\d\d a\s/.test(l)).map((l) => l.trim().split(/\s+/));
+      eq(rows.length, 11, "it prints the activity and decay heat at the end of every step");
+      if (rows.length === 11) {
+        const activity = rows.map((r) => Number(r[2]));
+        const heat = rows.map((r) => Number(r[3]));
+        eq(rows[0][4], "Mn56", "Mn56 leads the activity at shutdown");
+        eq(rows[10][4], "Fe55", "and Fe55 ten years on");
+        eq(activity.every((a, i) => a > 0 && (i === 0 || a <= activity[i - 1])), true, "the activity falls as the iron cools");
+        eq(heat.every((h, i) => h > 0 && (i === 0 || h <= heat[i - 1])), true, "and so does the decay heat");
+        ok(`  ${activity[0].toExponential(4)} Bq and ${heat[0].toExponential(4)} W at shutdown`);
+      }
+      eq(await app(() => window.yaniScript.plots), 1, "it draws its figure");
+      eq(await page.getAttribute("#py-plots iframe", "sandbox"), "allow-scripts", "in a sandboxed frame");
+      eq(await page.isVisible('[data-pypanel="plots"]'), true, "and the run lands on the Plots tab");
+      await page.frameLocator("#py-plots iframe").locator(".main-svg").first().waitFor({ timeout: 30_000 }).then(
+        () => ok("plotly drew the figure inside the frame"),
+        () => fail("the figure's frame has no plotly chart in it"),
+      );
+      const counter = out.split("\n").filter((l) => l.startsWith("Downloaded "));
+      const m = counter.length === 1 && counter[0].match(/^Downloaded (\d+) of (\d+) nuclides$/);
+      eq(Boolean(m && m[1] === m[2]), true, `the download counter reaches M of M on one line (${counter.join(" | ")})`);
+      const ironRun = await app(() => window.yaniScript.runFetch);
+      eq(ironRun.batched > 1, true, `the downloads went out in batches (${ironRun.batched} of ${ironRun.requests} requests)`);
+      ok(`  ${(ironRun.bytes / 1048576).toFixed(1)} MB of nuclear data in ${ironRun.requests} requests`);
+      const fetched = await app(() => window.yaniScript.fetched);
+      const chain = fetched.filter((f) => f.kind === "transmutation").map((f) => f.name).sort().join(",");
+      eq(chain.includes("decay") && chain.includes("reactions"), true, `the chain came from the release (${chain})`);
+      eq(fetched.some((f) => f.kind === "release" && f.library === "endf-b8.1"), true, "through the release's latest.json and manifest");
+      eq(fetched.some((f) => f.kind === "neutron" && f.name === "Fe56"), true, "and Fe56's cross sections from its folder");
+
+      // -- Reruns read the held data ---------------------------------------
+      const held = ironRun.requests;
+      await runCode(examples["Iron activation"]);
+      eq((await app(() => window.yaniScript.runFetch)).requests, 0, `a rerun fetches nothing (the first made ${held} requests)`);
+
+      // -- The form's setup, in the editor ----------------------------------
+      // Iron on the form, opened in the Python tab: the script the download
+      // writes, drawing its figures in the page instead of writing files.
+      await page.click('.modes [data-mode="form"]');
+      await page.click('[data-tab="custom"]');
+      await page.fill('#composition input[data-k="name"]', "Fe56");
+      await page.fill("#density", "7.874");
+      await page.fill("#volume", "1000");
+      await page.waitForFunction(() => {
+        const el = document.getElementById("plot-material");
+        return el.data && el.data[0].y.length === 1 && el.data[0].y[0] === "Fe56";
+      }, null, { timeout: 10000 });
+      page.once("dialog", (d) => d.accept());
+      await page.click("#open-python");
+      await page.waitForFunction(() => window.yaniScript.code().includes('"Fe56": 1'), null, { timeout: 10000 });
+      let script = await app(() => window.yaniScript.code());
+      eq(await page.$eval("#script-mode", (el) => !el.hidden), true, "Open it in the Python tab switches to the editor");
+      eq(/^for figure in figures\.values\(\):\n {4}figure\.show\(\)$/m.test(script) && !script.includes("write_html"), true,
+        "with the form's script, drawing its figures in the page");
+      // Core's chain fixture carries no isomeric branching, which the form
+      // reads as no branching at all and the wheel refuses to read as a part
+      // of the release, so the script is pointed at none where the release
+      // has none.
+      const manifest = await (await fetch(`${base}fixtures/endf-b8.1/fixtures/manifest.json`)).json();
+      if (!manifest.files.some((f) => f.path.startsWith("transmutation/branching.arrow/"))) {
+        script = script.replace('yani.transmutation_branch_ratios = "endf-b8.1"', "yani.transmutation_branch_ratios = None");
+      }
+      script += "\nprint(f\"peak activity {max(sum(a.values()) for a in activity)!r} Bq\")\n";
+      out = await runCode(script);
+      eq(/^Finished/.test(await status()), true, `the form's script runs (${await status()})`);
+      const peak = Number((out.match(/^peak activity (\S+) Bq$/m) || [])[1]);
+      eq(peak > 0, true, `peak activity ${peak.toExponential(4)} Bq`);
+      const captions = await app(() => [...document.querySelectorAll("#py-plots figcaption span")].map((el) => el.textContent));
+      eq(captions.join("|"), "Activity|Decay heat|Contact dose rate, at the surface|Inventory at the final step|Decay photon lines, final step",
+        "and draws the form's five figures, through figure.show()");
+
+      // -- A figure partway down is drawn where it stands ------------------
+      // A plotly method answering the figure it was called on is building
+      // it, not asking to see it, so only the bare `figure` line draws.
+      out = await runCode([
+        "import plotly.graph_objects as go",
+        "figure = go.Figure()",
+        "figure.add_scatter(x=[1, 2], y=[3, 4])",
+        "figure.update_layout(title='first')",
+        "figure",
+        "second = go.Figure(layout={'title': 'second'})",
+        "second",
+        "x = 1",
+      ].join("\n"));
+      const drawn = await app(() => [...document.querySelectorAll("#py-plots figcaption span")].map((el) => el.textContent));
+      eq(drawn.join("|"), "first|second", "a figure line partway down is drawn, in order, and add_scatter draws nothing");
+    }
+
+    // -- Errors ---------------------------------------------------------------
+    let out = await runCode("import yani\n\nx = 1\nyani.Material({'Fe56': 1.0}, -1.0).nonexistent\n");
+    eq(/File "yani_run\.py", line 4/.test(out), true, "a traceback points at the script's line");
+    eq(!out.includes("_pyodide") && !out.includes("eval_code"), true, "and hides Pyodide's frames");
+    eq(/^Failed/.test(await status()), true, "the status says Failed");
+    out = await runCode("def f(:\n  pass\n");
+    eq(out.includes("SyntaxError"), true, "a syntax error is reported");
+
+    // -- Stop -----------------------------------------------------------------
+    await app((c) => { window.yaniScript.setCode(c); window.yaniScript.run(); }, "import time\nwhile True:\n    time.sleep(0.01)\n");
+    await page.waitForFunction(() => window.yaniScript.state === "running");
+    await page.waitForTimeout(500);
+    await page.click("#py-stop");
+    await waitReady();
+    out = await output();
+    eq(out.includes("KeyboardInterrupt"), true, "Stop interrupts Python");
+
+    // -- Share link -------------------------------------------------------------
+    const shared = "import yani\nprint('shared', yani.__version__)\n";
+    await app((c) => window.yaniScript.setCode(c), shared);
+    await page.click("#py-share");
+    await page.waitForFunction(() => location.hash.startsWith("#code="));
+    const second = await context.newPage();
+    await second.goto(page.url());
+    await second.waitForFunction(() => window.yaniScript, null, { timeout: 60000 });
+    eq(await second.evaluate(() => window.yaniScript.code()), shared, "a shared link opens the Python tab on the same code");
+    await second.close();
+
+    // -- Live origin ------------------------------------------------------------
+    // The iron example against the published release, which the native wheel
+    // answers with these rows (yani-core 0.21.0, release 2026-10-10.1).
+    if (process.argv.includes("--live")) {
+      const live = await context.newPage();
+      await live.goto(base);
+      await live.click('.modes [data-mode="python"]');
+      await live.waitForFunction(() => window.yaniScript && window.yaniScript.state === "ready", null, { timeout: RUN_TIMEOUT });
+      const liveStarted = Date.now();
+      await live.evaluate((c) => { window.yaniScript.setCode(c); window.yaniScript.run(); }, examples["Iron activation"]);
+      await live.waitForFunction(() => window.yaniScript.state === "ready"
+        && /^(Finished|Failed)/.test(document.getElementById("py-status").textContent), null, { timeout: 1_800_000 });
+      const liveOut = await live.textContent("#py-output");
+      const liveFetch = await live.evaluate(() => window.yaniScript.runFetch);
+      ok(`live: ${await live.textContent("#py-status")}, ${liveFetch.requests} requests, ${((Date.now() - liveStarted) / 1000).toFixed(0)} s`);
+      for (const row of [
+        " 0.000e+00 a        5.9805e+14       1.4460e+02   Mn56",
+        " 1.000e+01 a        1.9255e+13       1.8027e-02   Fe55",
+      ]) {
+        eq(liveOut.includes(row), true, `live: the published data gives the native wheel's row "${row.trim()}"`);
+      }
+      await live.close();
+    }
+
+    // -- What the page asked for --------------------------------------------------
+    const foreign = offOrigin().filter((u) => !u.startsWith(PYODIDE_CDN) && !PYPI.some((p) => u.startsWith(p))
+      && !(process.argv.includes("--live") && u.startsWith(`${ORIGIN}/`)));
+    eq(foreign.length, 0, `nothing off-origin but Pyodide's CDN and PyPI${foreign.length ? `: ${foreign.slice(0, 5).join(", ")}` : ""}`);
+    if (WHEEL) {
+      eq(requests.some((u) => u.startsWith("https://pypi.org/pypi/yani-core/")), false, "and yani-core is not asked of PyPI");
+    }
+    if (errors.length) fail(`Python tab page errors: ${errors.slice(0, 5).join(" | ")}`);
+    else ok("no page errors in the Python tab");
+    await page.screenshot({ path: "verify-python.png" });
+  } catch (e) {
+    fail(`Python tab: ${e.stack || e}`);
+  } finally {
+    await context.close();
+    server.close();
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -1,15 +1,17 @@
 name: Pages
 
-# Builds the single-file page and publishes it. The Pages source must be set to
-# "GitHub Actions" rather than a branch: the repository root has no index.html,
-# because the page only exists after `node build.mjs` inlines the wasm and
-# plotly into it, and dist/ is not committed.
+# Builds the single-file page, with the Python tab's files beside it, and
+# publishes it. The Pages source must be set to "GitHub Actions" rather than a
+# branch: the repository root has no index.html, because the page only exists
+# after `node build.mjs` inlines the wasm and plotly into it, and dist/ is not
+# committed.
 #
 # No secrets. The solver is committed under vendor/, matching core, which
 # commits its own wasm to python/yamc/_wasm rather than building it in CI, so
 # this workflow needs nothing beyond the default GITHUB_TOKEN. Refreshing the
 # solver is `wasm-pack build` in core and a copy into vendor/, recorded in
-# vendor/CORE_COMMIT -- see dev-readme.md.
+# vendor/CORE_COMMIT -- see dev-readme.md. The Python tab installs yani-core
+# from PyPI at the version vendor/YANI_CORE_VERSION pins.
 
 on:
   push:
@@ -52,18 +54,26 @@ jobs:
         # never fires once the placeholders are substituted, but its text is
         # still inlined, so the grep always matches. verify.mjs watches what the
         # page actually requests instead.
+        #
+        # The Python tab's checks run its examples in Chromium, with yani-core
+        # installed from PyPI, against the published data
+        # scripts/fetch-fixtures.mjs lists (Fe56, lithium and the
+        # transmutation chain), fetched once up front and served locally. The
+        # form's own transmutation needs core's fixtures, in core's layout, and
+        # is skipped here as before.
         run: |
           ls -la dist/
           npm ci
           npx playwright install --with-deps chromium
-          node verify.mjs
+          node scripts/fetch-fixtures.mjs .fixtures
+          YANI_FIXTURES=.fixtures node verify.mjs
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: page
           path: |
-            dist/index.html
+            dist/
             verify-*.png
 
       - uses: actions/upload-pages-artifact@v5
