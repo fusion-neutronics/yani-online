@@ -18,11 +18,12 @@
 
 import { chromium } from "playwright";
 import { readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 
 import {
   COALESCE_GAP, assembleNuclideData, energyRanges, kelvin, nearestTemperature, planEnergyFetch,
   planFetch, planNuclide, publishedTemperatures, rangeHeader, reactionRanges, spliceStream,
+  checkFile, checkParts, parseLatest, parseManifest, sha256Hex, SUPPORTED_FORMAT_VERSIONS,
   wantedParts,
 } from "./src/ranges.js";
 import { SPECTRA } from "./src/spectra.js";
@@ -34,17 +35,95 @@ const FIXTURES = process.env.YANI_FIXTURES || "../core/crates/yamc/tests";
 const CHAIN = `${FIXTURES}/transmutation-endf-b8.1-sfr.arrow`;
 const ORIGIN = "https://yamc-data.xsplot.com";
 
-/// Map a data-origin URL onto the fixture tree.
+// The release the fixtures are served as, under every library keyword.
+const FIXTURE_RELEASE = "fixtures";
+
+/// The fixtures as one data release, in the layout the origin publishes:
+/// `latest.json` naming a release called `fixtures`, its `manifest.json`
+/// listing every file with its size and sha256, and the files under
+/// `<keyword>/fixtures/`. The same tree answers for every keyword, as the
+/// unversioned routing before it did: the fixtures are ENDF/B-8.1's, and a
+/// library change is checked by what it refetches, not by what it reads.
 ///
-/// The chain lives under subsection directories named without the `.arrow`
-/// suffix the URL carries; per-nuclide data is a directory per nuclide.
-function fixturePath(url) {
-  const path = url.slice(ORIGIN.length + 1);
-  let m = path.match(/^[^/]+\/transmutation\/([^/]+)\.arrow\/(.+)$/);
-  if (m) return `${CHAIN}/${m[1]}/${m[2]}`;
-  m = path.match(/^[^/]+\/neutron\/([^/]+)\.arrow\/(.+)$/);
-  if (m) return `${FIXTURES}/${m[1]}.arrow/${m[2]}`;
-  return null;
+/// Only the files an activation load reads are listed: per nuclide its
+/// `version.json`, `nuclide.arrow`, `energy.arrow` and `reactions.arrow`, and
+/// the chain's subsections, which core's fixture keeps in directories named
+/// without the `.arrow` the URL carries. Core's fixtures predate the per-batch
+/// sha256 in the byte-range indexes (fusion-neutronics/core#323), so each
+/// `version.json` is served with them added from the section it indexes, as
+/// the converter writes them now; the page's per-batch check then runs on
+/// every range it fetches here.
+let fixtureRelease = null;
+async function fixtureFiles() {
+  if (fixtureRelease) return fixtureRelease;
+  const files = new Map();
+  const NEUTRON = ["version.json", "nuclide.arrow", "energy.arrow", "reactions.arrow"];
+  for (const d of readdirSync(FIXTURES)) {
+    if (!/^[A-Z][a-z]?\d+(_m\d+)?\.arrow$/.test(d) || !statSync(`${FIXTURES}/${d}`).isDirectory()) continue;
+    for (const f of NEUTRON) {
+      const file = `${FIXTURES}/${d}/${f}`;
+      if (existsSync(file)) files.set(`neutron/${d}/${f}`, file);
+    }
+  }
+  for (const sub of existsSync(CHAIN) ? readdirSync(CHAIN) : []) {
+    if (!statSync(`${CHAIN}/${sub}`).isDirectory()) continue;
+    for (const f of readdirSync(`${CHAIN}/${sub}`)) {
+      if (/\.(arrow|json)$/.test(f)) files.set(`transmutation/${sub}.arrow/${f}`, `${CHAIN}/${sub}/${f}`);
+    }
+  }
+  const bodies = new Map();
+  const listed = [];
+  for (const [path, file] of [...files].sort()) {
+    let body = await readFile(file);
+    if (path.endsWith("/version.json")) body = await withRangeHashes(body, file.slice(0, -"version.json".length));
+    bodies.set(path, body);
+    listed.push({ path, bytes: body.length, sha256: await sha256Hex(body) });
+  }
+  fixtureRelease = { bodies, listed };
+  return fixtureRelease;
+}
+
+/// A `version.json` with a sha256 on every byte-range index entry, from the
+/// sections in `folder` it indexes.
+async function withRangeHashes(bytes, folder) {
+  const version = JSON.parse(bytes);
+  for (const [key, section, nested] of [["reaction_ranges", "reactions.arrow", true], ["energy_ranges", "energy.arrow", false]]) {
+    const index = version[key];
+    if (!index || !existsSync(`${folder}${section}`)) continue;
+    const body = await readFile(`${folder}${section}`);
+    const groups = nested ? Object.values(index.mts) : [index.temperatures];
+    for (const entry of [index.schema, ...groups.flatMap((g) => Object.values(g))]) {
+      if (entry.length < 3) entry[2] = await sha256Hex(body.subarray(entry[0], entry[0] + entry[1]));
+    }
+  }
+  return Buffer.from(JSON.stringify(version));
+}
+
+/// The fixture answer to a data-origin URL, `{ path, body }`, or null for
+/// anything the release does not carry. A URL in the unversioned layout the
+/// page used before releases is null too, and counted by the caller.
+async function fixtureBody(url) {
+  const m = url.slice(ORIGIN.length + 1).match(/^([^/]+)\/(.+)$/);
+  if (!m) return null;
+  const [, keyword, rest] = m;
+  const { bodies, listed } = await fixtureFiles();
+  const manifest = Buffer.from(JSON.stringify({
+    schema: "yamc-data-manifest", keyword, release: FIXTURE_RELEASE, format_version: 2, files: listed,
+  }));
+  if (rest === "latest.json") {
+    return {
+      path: `${keyword}/latest.json`,
+      body: Buffer.from(JSON.stringify({
+        schema: "yamc-data-latest", keyword, release: FIXTURE_RELEASE, format_version: 2,
+        manifest: `${FIXTURE_RELEASE}/manifest.json`, manifest_bytes: manifest.length,
+        manifest_sha256: await sha256Hex(manifest),
+      })),
+    };
+  }
+  if (rest === `${FIXTURE_RELEASE}/manifest.json`) return { path: `${keyword}/${rest}`, body: manifest };
+  const inRelease = rest.startsWith(`${FIXTURE_RELEASE}/`) && rest.slice(FIXTURE_RELEASE.length + 1);
+  const body = inRelease && bodies.get(inRelease);
+  return body ? { path: inRelease, body } : null;
 }
 
 const fail = (msg) => { console.error(`FAIL  ${msg}`); process.exitCode = 1; };
@@ -359,7 +438,7 @@ function checkSpectra() {
 /// order for exactly that reason, and with both ranged files of one nuclide in
 /// flight together, since a span of the grids filed under the reactions would
 /// be the same silent error across files.
-function checkAssembly() {
+async function checkAssembly() {
   const { file, energyFile, version } = synthetic();
   const { reactions: plan, energy: grid } = planNuclide(version, new Set([16, 102, 103]), 294);
   const plans = new Map([["Fe56", new Map([["energy.arrow", grid], ["reactions.arrow", plan]])]]);
@@ -378,7 +457,7 @@ function checkAssembly() {
   ];
   const arrived = [nuclideArrow, gridBody(1), body(1), gridBody(0), body(0)];
 
-  const got = assembleNuclideData(jobs, arrived, plans);
+  const got = await assembleNuclideData(jobs, arrived, plans);
   eq(got.items.length, 3, "all three files are handed over");
   eq(got.missing.size, 0, "nothing is missing");
   eq(got.saved, (plan.full - plan.bytes) + (grid.full - grid.bytes), "the saving is both files less their spans");
@@ -396,16 +475,16 @@ function checkAssembly() {
 
   // A span that never arrived. The nuclide has to be reported rather than given
   // a stream with a hole in it, whichever file the hole is in.
-  const short = assembleNuclideData(jobs, [nuclideArrow, gridBody(1), body(1), gridBody(0), undefined], plans);
+  const short = await assembleNuclideData(jobs, [nuclideArrow, gridBody(1), body(1), gridBody(0), undefined], plans);
   eq(short.items.some((it) => it.file === "reactions.arrow"), false, "a lost span hands over no stream");
   eq(short.items.some((it) => it.file === "energy.arrow"), true, "while the file that did arrive whole is handed over");
   eq(short.missing.has("Fe56"), true, "and the nuclide is reported missing");
-  const noGrid = assembleNuclideData(jobs, [nuclideArrow, undefined, body(1), gridBody(0), body(0)], plans);
+  const noGrid = await assembleNuclideData(jobs, [nuclideArrow, undefined, body(1), gridBody(0), body(0)], plans);
   eq(noGrid.missing.has("Fe56"), true, "a lost span of the grids reports the nuclide too");
 
   // A proxy that stripped the header: 200 with the whole object rather than 206
   // with the slice. The body is the file, so it is used as the file.
-  const stripped = assembleNuclideData(
+  const stripped = await assembleNuclideData(
     [jobs[0], jobs[1], { ...jobs[2], status: 200 }, jobs[3], { ...jobs[4], status: 200 }],
     [nuclideArrow, gridBody(1), file, gridBody(0), file], plans);
   eq(stripped.stripped, true, "a 200 answer to a range is noticed");
@@ -423,16 +502,108 @@ function checkAssembly() {
     { nuclide: "Li6", file: "energy.arrow" },
     { nuclide: "Li6", file: "reactions.arrow" },
   ];
-  const plain = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, nuclideArrow], new Map());
+  const plain = await assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, nuclideArrow], new Map());
   eq(plain.items.length, 3, "an unplanned nuclide hands over every file");
   eq(plain.saved, 0, "and saves nothing");
   // A 404 on the grids reports the nuclide too: core refuses a load with no
   // energy.arrow, so handing over the other two would fail later and less
   // clearly.
-  const noGrids = assembleNuclideData(plainJobs, [nuclideArrow, undefined, nuclideArrow], new Map());
+  const noGrids = await assembleNuclideData(plainJobs, [nuclideArrow, undefined, nuclideArrow], new Map());
   eq(noGrids.missing.has("Li6"), true, "a 404 on energy.arrow reports the nuclide");
-  const gap = assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, undefined], new Map());
+  const gap = await assembleNuclideData(plainJobs, [nuclideArrow, nuclideArrow, undefined], new Map());
   eq(gap.missing.has("Li6"), true, "a 404 on the whole-file path reports the nuclide");
+}
+
+/// Check the sha256 checks: the per-batch hashes a byte-range index can carry
+/// (fusion-neutronics/core#323), and the release pointer, manifest and whole
+/// files. No browser and no network; WebCrypto is Node's.
+async function checkHashes() {
+  const { file, energyFile, version } = synthetic();
+  const hashed = structuredClone(version);
+  const add = async (entry, body) => entry.push(await sha256Hex(body.subarray(entry[0], entry[0] + entry[1])));
+  await add(hashed.reaction_ranges.schema, file);
+  for (const byTemperature of Object.values(hashed.reaction_ranges.mts)) {
+    for (const entry of Object.values(byTemperature)) await add(entry, file);
+  }
+  await add(hashed.energy_ranges.schema, energyFile);
+  for (const entry of Object.values(hashed.energy_ranges.temperatures)) await add(entry, energyFile);
+
+  const index = reactionRanges(hashed);
+  eq(index !== null && /^[0-9a-f]{64}$/.test(index.mts.get(16).get("294K").sha256), true,
+     "a range index entry of [offset, length, sha256] is read with its hash");
+  eq(reactionRanges(version).mts.get(16).get("294K").sha256, undefined, "and one of [offset, length] without");
+  const badHash = structuredClone(hashed);
+  badHash.reaction_ranges.mts[16]["294K"][2] = "not a hash";
+  eq(reactionRanges(badHash), null, "a third element that is not a sha256 makes the index unusable");
+  const four = structuredClone(hashed);
+  four.reaction_ranges.mts[16]["294K"].push(0);
+  eq(reactionRanges(four), null, "and so does a fourth element");
+
+  const wanted = new Set([16, 102, 103]);
+  const { reactions: plan, energy: grid } = planNuclide(hashed, wanted, 294);
+  const plain = planNuclide(version, wanted, 294);
+  eq(JSON.stringify(plan.spans), JSON.stringify(plain.reactions.spans), "the hashes change no span asked for");
+  const plans = new Map([["Fe56", new Map([["energy.arrow", grid], ["reactions.arrow", plan]])]]);
+  const slice = (bytes, s) => bytes.slice(s.off, s.off + s.len);
+  const jobs = [
+    ...grid.spans.map((range, spanIndex) => ({ nuclide: "Fe56", file: "energy.arrow", range, spanIndex, status: 206 })),
+    ...plan.spans.map((range, spanIndex) => ({ nuclide: "Fe56", file: "reactions.arrow", range, spanIndex, status: 206 })),
+  ];
+  const bodies = [...grid.spans.map((sp) => slice(energyFile, sp)), ...plan.spans.map((sp) => slice(file, sp))];
+  const got = await assembleNuclideData(jobs, bodies, plans);
+  eq(got.checked, plan.parts.length + grid.parts.length, "every batch fetched by range is checked against its sha256");
+  eq(got.items.length, 2, "and the checked streams are handed over");
+  const unhashed = await assembleNuclideData(jobs, bodies,
+    new Map([["Fe56", new Map([["energy.arrow", plain.energy], ["reactions.arrow", plain.reactions]])]]));
+  eq(unhashed.checked, 0, "an index without hashes checks nothing and still splices");
+
+  // One byte flipped inside a wanted batch, which the splice would hand over
+  // without complaint since the framing still walks.
+  const damaged = bodies.map((b) => b.slice());
+  const part = plan.parts[1];
+  const span = plan.spans.findIndex((sp) => part.off >= sp.off && part.off + part.len <= sp.off + sp.len);
+  damaged[grid.spans.length + span][part.off - plan.spans[span].off] ^= 0xff;
+  try {
+    await assembleNuclideData(jobs, damaged, plans);
+    fail("a batch that differs from its sha256 was spliced");
+  } catch (e) {
+    if (/do not match the sha256/.test(e.message)) ok(`a batch that differs from its sha256 is refused: ${e.message}`);
+    else fail(`a damaged batch threw something else: ${e.message}`);
+  }
+  eq(await checkParts(plan, plan.spans.map((sp) => slice(file, sp)), "Fe56"), plan.parts.length, "checkParts counts what it checked");
+
+  // The release pointer and manifest, the way the origin publishes them.
+  const manifestBytes = new TextEncoder().encode(JSON.stringify({
+    keyword: "endf-b8.1", release: "r1", format_version: 2,
+    files: [{ path: "neutron/Fe56.arrow/reactions.arrow", bytes: file.length, sha256: await sha256Hex(file) }],
+  }));
+  const pointer = {
+    keyword: "endf-b8.1", release: "r1", format_version: 2, manifest: "r1/manifest.json",
+    manifest_bytes: manifestBytes.length, manifest_sha256: await sha256Hex(manifestBytes),
+  };
+  const latest = parseLatest(JSON.stringify(pointer), "endf-b8.1");
+  eq(latest.release, "r1", "latest.json is read for its release");
+  threw("a release in a format this solver does not read",
+    () => parseLatest(JSON.stringify({ ...pointer, format_version: Math.max(...SUPPORTED_FORMAT_VERSIONS) + 1 }), "endf-b8.1"));
+  threw("a latest.json without a manifest", () => parseLatest(JSON.stringify({ ...pointer, manifest: undefined }), "endf-b8.1"));
+  const files = await parseManifest(manifestBytes, latest, "endf-b8.1");
+  eq(files.get("neutron/Fe56.arrow/reactions.arrow").bytes, file.length, "the manifest is indexed by path");
+  const refused = async (what, promise) => {
+    try {
+      await promise;
+      fail(`${what}: accepted`);
+    } catch {
+      ok(`${what}: refused`);
+    }
+  };
+  await refused("a manifest that is not the one latest.json names",
+    parseManifest(manifestBytes, { ...latest, manifest_sha256: "0".repeat(64) }, "endf-b8.1"));
+  const entry = files.get("neutron/Fe56.arrow/reactions.arrow");
+  eq(await checkFile(file, entry, "reactions.arrow"), true, "a whole file is checked against its manifest line");
+  const flipped = file.slice();
+  flipped[5] ^= 1;
+  await refused("a whole file that differs from its manifest line", checkFile(flipped, entry, "reactions.arrow"));
+  eq(await checkFile(file, undefined, "reactions.arrow"), false, "and a file with no manifest line is not checked");
 }
 
 /// Check the byte-range fetch against the real origin.
@@ -532,7 +703,8 @@ async function main() {
   // First, and without a browser or a byte of nuclear data: the range
   // arithmetic the cross-section fetch is built on.
   checkRanges();
-  checkAssembly();
+  await checkAssembly();
+  await checkHashes();
   checkSpectra();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
@@ -600,9 +772,14 @@ async function main() {
   // what the same run would have downloaded before the index existed, and
   // without it the transfer below is a number with nothing to be small against.
   const rangedFull = new Map();
+  // Requests in the unversioned layout from before releases, which the page
+  // should no longer make at all.
+  let unversioned = 0;
   await page.route(`${ORIGIN}/**`, async (route) => {
-    const path = fixturePath(route.request().url());
-    if (!path || !existsSync(path)) {
+    const found = await fixtureBody(route.request().url());
+    if (!/^[^/]+\/(latest\.json|fixtures\/)/.test(route.request().url().slice(ORIGIN.length + 1))) unversioned++;
+    const path = found && found.path;
+    if (!found) {
       // A 404 is the honest answer for a nuclide this fixture set does not
       // carry, and exercising it is the point: the page has to survive gaps.
       missed++;
@@ -610,7 +787,7 @@ async function main() {
       return;
     }
     served++;
-    const body = await readFile(path);
+    const body = found.body;
     const want = (route.request().headers().range || "").match(/^bytes=(\d+)-(\d+)$/);
     if (!want) {
       await route.fulfill({ status: 200, body });
@@ -880,6 +1057,10 @@ async function main() {
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+  // Every file through the release: the pointer, the manifest, and paths
+  // under the release folder. Nuclides the manifest does not list are not
+  // asked for at all, so the 404s above are what is left after that.
+  eq(unversioned, 0, "requests outside the release layout");
 
   // Whether the run fetched MTs or whole files. Both are correct -- the whole
   // file is the fallback and has to keep working -- so this reports rather than
