@@ -41,8 +41,8 @@ export class YaniSession {
      *
      * `file` is `nuclide.arrow`, `energy.arrow`, `reactions.arrow` or
      * `version.json`, matching `NEUTRON_XS_ONLY_SECTIONS`. `energy.arrow`
-     * carries the union energy grids, which moved out of `nuclide.arrow` in
-     * fusion-neutronics/core#100; a host that does not upload it gets a load
+     * carries the union energy grids, which are their own section rather than
+     * columns of `nuclide.arrow` from format version 2; a host that does not upload it gets a load
      * error naming it, not a silent answer. The bytes land at
      * `/{nuclide}.arrow/{file}`
      * in the virtual filesystem and the nuclear-data config is pointed at that
@@ -284,9 +284,11 @@ export class YaniSession {
      * The nuclides a transmutation of the current material would need cross
      * sections for, as a JSON array the host fetches.
      *
-     * This is the whole download budget, and it is knowable before any of it
-     * is fetched -- which is what lets the UI show a byte count up front
-     * rather than an open-ended spinner.
+     * This is the chain's reachable closure, an upper bound on the download
+     * that is knowable before any of it is fetched, which is what lets the UI
+     * show a byte count up front rather than an open-ended spinner. The solve
+     * itself reads only the products it populates above
+     * `yani_transmute::DEFAULT_PRODUCT_THRESHOLD`, a small part of it.
      * @returns {string}
      */
     requiredNuclides() {
@@ -320,9 +322,18 @@ export class YaniSession {
      *
      * Returns one entry per step: cumulative time, total activity, decay heat
      * and contact dose rate, each also broken down by nuclide, the atom
-     * densities, and the decay photon line spectrum. Everything the plots
-     * need, in one call, so the host does not pay a boundary crossing per
-     * series.
+     * densities, the decay photon line spectrum, and the photon continua
+     * apart from it (`photon_continua`: per nuclide, energies in eV, rates in
+     * photons/s/eV, the interpolation law, and the emission rate, null where
+     * this build cannot integrate the continuum: no stated law, a law other
+     * than histogram or linear-linear, or a malformed table: unpaired lists,
+     * a non-finite or descending energy, a negative or non-finite rate), and
+     * the hydrogen and helium produced (`gas_production_appm`: appm of the
+     * initial atoms, starting gas subtracted, keyed `H1`, `H2`, `H3`, `He3`,
+     * `He4` and the totals `H` and `He`). A chain without all five gas
+     * nuclides is an error rather than a zero.
+     * Everything the plots need, in one call, so the host does not pay a
+     * boundary crossing per series.
      * @param {string} spectra_json
      * @param {string} schedule_json
      * @returns {string}

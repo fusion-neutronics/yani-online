@@ -12,11 +12,15 @@
 
 import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
-import { assembleNuclideData, planNuclide, rangeHeader } from "./ranges.js";
+import { assembleNuclideData, checkFile, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SPECTRA } from "./spectra.js";
 
 // --- nuclear data ---------------------------------------------------------
 
+// Every library is read from its current release on the origin: its
+// `latest.json` names the release, whose `manifest.json` lists every file with
+// its size and sha256, and the files are under `<keyword>/<release>/`. See
+// `releaseOf`.
 const ORIGIN = "https://yamc-data.xsplot.com";
 
 // Which library publishes which chain subsection. Mirrors
@@ -358,6 +362,12 @@ async function bootPlotly() {
 /// proxy that strips the header answers with the entire object, and splicing
 /// that as though it were the slice asked for yields a stream of the wrong
 /// bytes that still decodes.
+///
+/// A job carrying `entry`, its file's line in the release manifest, has what
+/// arrives checked against it whenever what arrived is the whole file: always
+/// for a plain request, and for a ranged one that came back 200. A file that
+/// differs throws whether or not the job is optional. Optional means the file
+/// may be absent, not that it may be wrong.
 async function fetchAll(jobs, onProgress, limit = 12) {
   let done = 0;
   let next = 0;
@@ -366,18 +376,21 @@ async function fetchAll(jobs, onProgress, limit = 12) {
     while (next < jobs.length) {
       const i = next++;
       const job = jobs[i];
+      let body = null;
       try {
         const resp = await fetch(
           job.url, job.range ? { headers: { Range: rangeHeader(job.range) } } : undefined);
         job.status = resp.status;
         if (resp.ok) {
-          results[i] = new Uint8Array(await resp.arrayBuffer());
+          body = new Uint8Array(await resp.arrayBuffer());
         } else if (!job.optional) {
           throw new Error(`${resp.status} ${job.url}`);
         }
       } catch (e) {
         if (!job.optional) throw e;
       }
+      if (body && (!job.range || job.status === 200)) await checkFile(body, job.entry, job.url);
+      results[i] = body || undefined;
       onProgress(++done / jobs.length);
     }
   }
@@ -385,15 +398,74 @@ async function fetchAll(jobs, onProgress, limit = 12) {
   return results;
 }
 
+/// The release of `keyword` the page reads from, resolved once per session.
+///
+/// `latest.json` first, a few hundred bytes, then the manifest it names,
+/// checked against the size and sha256 the pointer gives. Resolves to
+/// `{ keyword, release, base, files }`: `base` is the folder every file is
+/// fetched under and `files` the manifest by path. Held for the session
+/// because a release is immutable: everything fetched from one is current for
+/// as long as it is the one in use, so a pointer that moves mid-session cannot
+/// mix two releases into one answer. Reloading the page picks up a new one.
+///
+/// A library with no `latest.json` (404) has not been published as a release
+/// yet. TENDL-2025 and TENDL-2017 are in that state until their first
+/// release (due 2026-10-13 to 15), while their files are still at the old
+/// unversioned paths. Those are read for now, with `files` null, so nothing
+/// can be checked and no manifest says which nuclides exist: `legacy` is set,
+/// and the run says which libraries it read that way. Once the library is
+/// released this path stops being taken, with no change here. If the old paths
+/// go first, the chain's required files 404 and the run stops with a message
+/// naming the library.
+const releases = new Map();
+function releaseOf(keyword) {
+  if (!releases.has(keyword)) {
+    const resolving = (async () => {
+      const resp = await fetch(`${ORIGIN}/${keyword}/latest.json`);
+      if (resp.status === 404) {
+        return { keyword, release: null, base: `${ORIGIN}/${keyword}`, files: null, legacy: true };
+      }
+      if (!resp.ok) throw new Error(`${keyword}/latest.json: HTTP ${resp.status}`);
+      const latest = parseLatest(await resp.text(), keyword);
+      const manifestResp = await fetch(`${ORIGIN}/${keyword}/${latest.manifest}`);
+      if (!manifestResp.ok) throw new Error(`${keyword}/${latest.manifest}: HTTP ${manifestResp.status}`);
+      const files = await parseManifest(new Uint8Array(await manifestResp.arrayBuffer()), latest, keyword);
+      return { keyword, release: latest.release, base: `${ORIGIN}/${keyword}/${latest.release}`, files, legacy: false };
+    })();
+    // A failure is not held: the next run asks again rather than repeating an
+    // error from a dropped connection for the rest of the session.
+    resolving.catch(() => releases.delete(keyword));
+    releases.set(keyword, resolving);
+  }
+  return releases.get(keyword);
+}
+
+/// The libraries this session has read from the old unversioned paths, for the
+/// status line. See `releaseOf`.
+const legacyLibraries = new Set();
+
 async function loadChain(solver) {
   const jobs = [];
+  setStatus("Finding the current data releases…");
   for (const [subsection, files] of Object.entries(CHAIN_SECTIONS)) {
     const library = DEFAULTS[subsection] && $(`data-${shortKey(subsection)}`)?.value;
     if (!library) continue;
+    const release = await releaseOf(library);
+    if (release.legacy) legacyLibraries.add(library);
     for (const [file, required] of files) {
+      const path = `transmutation/${subsection}.arrow/${file}`;
+      const entry = release.files && release.files.get(path);
+      if (release.files && !entry) {
+        // The manifest is the list of what the release carries, so an
+        // optional file it does not list is not asked for, and a required one
+        // is a library that does not publish this subsection.
+        if (required) throw new Error(`${library} release ${release.release} publishes no ${path}`);
+        continue;
+      }
       jobs.push({
-        url: `${ORIGIN}/${library}/transmutation/${subsection}.arrow/${file}`,
+        url: `${release.base}/${path}`,
         optional: !required,
+        entry,
         subsection,
         file,
       });
@@ -504,15 +576,28 @@ const XS_CONCURRENCY = 48;
 async function loadCrossSections(solver, nuclides) {
   const library = $("data-xs").value;
   const kelvin = requestedKelvin();
-  const url = (nuclide, file) => `${ORIGIN}/${library}/neutron/${nuclide}.arrow/${file}`;
+  const release = await releaseOf(library);
+  if (release.legacy) legacyLibraries.add(library);
+  const path = (nuclide, file) => `neutron/${nuclide}.arrow/${file}`;
+  const url = (nuclide, file) => `${release.base}/${path(nuclide, file)}`;
+  // The manifest line of a file, which the fetch checks it against; undefined
+  // without a manifest, where nothing is checked.
+  const entry = (nuclide, file) => release.files && release.files.get(path(nuclide, file));
 
-  setStatus(`Checking what ${nuclides.length} nuclides publish…`);
-  const versions = await fetchAll(
-    nuclides.map((nuclide) => ({ url: url(nuclide, "version.json"), optional: true, nuclide })),
+  // With a manifest, a nuclide it does not list is not published by this
+  // release, and nothing is asked for it: the 404s are gone, not just
+  // survived.
+  const missing = new Set(
+    release.files ? nuclides.filter((nuclide) => !entry(nuclide, "version.json")) : []);
+  const listed = nuclides.filter((nuclide) => !missing.has(nuclide));
+  setStatus(`Checking what ${listed.length} nuclides publish…`);
+  const listedVersions = await fetchAll(
+    listed.map((nuclide) => ({ url: url(nuclide, "version.json"), entry: entry(nuclide, "version.json"), optional: true, nuclide })),
     (f) => { $("progress").value = f; }, XS_CONCURRENCY);
+  const byNuclide = new Map(listed.map((nuclide, i) => [nuclide, listedVersions[i]]));
+  const versions = nuclides.map((nuclide) => byNuclide.get(nuclide));
 
   const items = [];
-  const missing = new Set();
   // Nuclide to file to the plan its range requests were issued from.
   const plans = new Map();
   const jobs = [];
@@ -528,7 +613,7 @@ async function loadCrossSections(solver, nuclides) {
       continue;
     }
     items.push({ nuclide, file: "version.json", bytes: versions[i] });
-    jobs.push({ url: url(nuclide, "nuclide.arrow"), optional: true, nuclide, file: "nuclide.arrow" });
+    jobs.push({ url: url(nuclide, "nuclide.arrow"), entry: entry(nuclide, "nuclide.arrow"), optional: true, nuclide, file: "nuclide.arrow" });
 
     const plan = state.wantedMts && nuclidePlan(versions[i], state.wantedMts, kelvin);
     if (plan && plan.temperature !== null) {
@@ -546,13 +631,13 @@ async function loadCrossSections(solver, nuclides) {
     const files = [["energy.arrow", plan && plan.energy], ["reactions.arrow", plan && plan.reactions]];
     for (const [file, filePlan] of files) {
       if (!filePlan) {
-        jobs.push({ url: url(nuclide, file), optional: true, nuclide, file });
+        jobs.push({ url: url(nuclide, file), entry: entry(nuclide, file), optional: true, nuclide, file });
         continue;
       }
       if (!plans.has(nuclide)) plans.set(nuclide, new Map());
       plans.get(nuclide).set(file, filePlan);
       filePlan.spans.forEach((range, spanIndex) => {
-        jobs.push({ url: url(nuclide, file), range, spanIndex, optional: true, nuclide, file });
+        jobs.push({ url: url(nuclide, file), entry: entry(nuclide, file), range, spanIndex, optional: true, nuclide, file });
       });
     }
   }
@@ -577,7 +662,7 @@ async function loadCrossSections(solver, nuclides) {
   // The assembly is in ranges.js so it can be checked without a browser: which
   // span belongs to which stream, and what to do with a range that came back as
   // a whole file, are the decisions here whose mistakes are silent.
-  const got = assembleNuclideData(jobs, bytes, plans);
+  const got = await assembleNuclideData(jobs, bytes, plans);
   items.push(...got.items);
   for (const nuclide of got.missing) missing.add(nuclide);
   if (got.stripped) {
@@ -589,7 +674,7 @@ async function loadCrossSections(solver, nuclides) {
   }
 
   const held = await solver.addNuclideData(items);
-  return { held, missing: [...missing], saved: got.saved };
+  return { held, missing: [...missing], saved: got.saved, checked: got.checked };
 }
 
 // --- building the calculation --------------------------------------------

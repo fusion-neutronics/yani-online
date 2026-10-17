@@ -29,11 +29,11 @@ const api = {
   /// Instantiate the solver from bytes the page already holds.
   ///
   /// `wasmB64` is the built page's inlined payload, decoded here so the main
-  /// thread never walks 3.4 MB of base64; `wasmBytes` is the dev tree's, which
+  /// thread never walks 5.7 MB of base64; `wasmBytes` is the dev tree's, which
   /// the page fetches from vendor/ because this scope's base URL is a blob and
   /// resolves nothing.
   ///
-  /// `initSync` compiles 2.5 MB of wasm synchronously, which is refused on the
+  /// `initSync` compiles 4.3 MB of wasm synchronously, which is refused on the
   /// main thread and allowed here. Blocking this thread at boot costs nothing:
   /// there is nothing else on it, and the page is waiting on the reply anyway.
   init({ wasmB64, wasmBytes }) {
