@@ -44,7 +44,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
     return res.json();
   };
-  const { release } = await getJson(`${ORIGIN}/latest.json`);
+  // The CDN caches latest.json, and can go on serving a pointer to a release
+  // that has since been deleted. A query string it has not seen is answered
+  // by the origin, as core's scripts/fetch_test_fixtures.py asks. The
+  // release's own files never change, so they are fetched as published.
+  const { release } = await getJson(`${ORIGIN}/latest.json?release-check=${Date.now()}`);
   const manifest = await getJson(`${ORIGIN}/${release}/manifest.json`);
   const listed = new Map(manifest.files.map((f) => [f.path, f]));
   const wanted = [
