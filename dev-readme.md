@@ -189,6 +189,14 @@ stop the run rather than being solved. The checking is WebCrypto's
 `localhost` are; a page served over plain http from elsewhere is refused rather
 than reading data it cannot check.
 
+`latest.json` is asked for with a `release-check` query of 16 random hex
+digits, new each time, as core's clients ask for it from
+fusion-neutronics/core#393 on. The CDN edge keys its cache on the query string,
+so the origin answers. A copy of the pointer at the edge can outlive the
+release it names: on 2026-10-17 every library's named a release that had been
+deleted, so every file under it was a 404. The manifest and the release's files
+are immutable and are asked for plainly, so the edge caches them.
+
 The release is held for the session, so a pointer that moves mid-session cannot
 mix two releases into one answer, and a reload picks up the new one. A nuclide
 the manifest does not list is not asked for at all. A library with no
@@ -394,7 +402,10 @@ release called `fixtures`, its manifest listing every file with its size and
 sha256, and the files under `<keyword>/fixtures/`, one tree answering for every
 keyword. A `version.json` whose index entries carry no sha256 has them added as
 it is served, so the per-batch check runs on every range the page fetches. A
-request outside the release layout is counted, and the check requires none.
+request is matched by its path, as the origin matches it. A request outside the
+release layout is counted, and the check requires none. Every `latest.json`
+request has to carry its own `release-check` value, and no other request any
+query.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default

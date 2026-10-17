@@ -12,7 +12,7 @@
 
 import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
 import { pythonScript } from "./python.js";
-import { assembleNuclideData, checkFile, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
+import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SPECTRA } from "./spectra.js";
 
 // --- nuclear data ---------------------------------------------------------
@@ -400,8 +400,9 @@ async function fetchAll(jobs, onProgress, limit = 12) {
 
 /// The release of `keyword` the page reads from, resolved once per session.
 ///
-/// `latest.json` first, a few hundred bytes, then the manifest it names,
-/// checked against the size and sha256 the pointer gives. Resolves to
+/// `latest.json` first, a few hundred bytes, asked for past the CDN edge's
+/// copy (see `latestUrl`), then the manifest it names, checked against the
+/// size and sha256 the pointer gives. Resolves to
 /// `{ keyword, release, base, files }`: `base` is the folder every file is
 /// fetched under and `files` the manifest by path. Held for the session
 /// because a release is immutable: everything fetched from one is current for
@@ -421,7 +422,7 @@ const releases = new Map();
 function releaseOf(keyword) {
   if (!releases.has(keyword)) {
     const resolving = (async () => {
-      const resp = await fetch(`${ORIGIN}/${keyword}/latest.json`);
+      const resp = await fetch(latestUrl(ORIGIN, keyword));
       if (resp.status === 404) {
         return { keyword, release: null, base: `${ORIGIN}/${keyword}`, files: null, legacy: true };
       }
