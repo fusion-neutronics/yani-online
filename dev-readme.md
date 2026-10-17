@@ -189,12 +189,12 @@ stop the run rather than being solved. The checking is WebCrypto's
 than reading data it cannot check.
 
 `latest.json` is asked for with a `release-check` query of 16 random hex
-digits, new each time, as core's clients ask for it. The CDN edge keys its
-cache on the query string, so the origin answers. A copy of the pointer at the
-edge can outlive the release it names: on 2026-10-17 every library's named a
-release that had been deleted, so every file under it was a 404. The manifest
-and the release's files are immutable and are asked for plainly, so the edge
-caches them.
+digits, new each time, as core's clients ask for it from
+fusion-neutronics/core#393 on. The CDN edge keys its cache on the query string,
+so the origin answers. A copy of the pointer at the edge can outlive the
+release it names: on 2026-10-17 every library's named a release that had been
+deleted, so every file under it was a 404. The manifest and the release's files
+are immutable and are asked for plainly, so the edge caches them.
 
 The release is held for the session, so a pointer that moves mid-session cannot
 mix two releases into one answer, and a reload picks up the new one. A nuclide
