@@ -45,12 +45,22 @@ const EOS = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
 /// fewer bytes.
 export const COALESCE_GAP = 16 * 1024;
 
-/// `[off, len]` as `version.json` spells a range, or `null` for anything else.
+/// `[off, len]` or `[off, len, sha256]` as `version.json` spells a range, or
+/// `null` for anything else.
+///
+/// The third element is the hex sha256 of exactly those bytes, which core's
+/// converter writes per batch (fusion-neutronics/core#323) so that a reader
+/// fetching a batch by range can check it, since the release manifest's hash
+/// covers only the whole object. An index without it is read as before and its
+/// ranges go unchecked; one with a third element that is not a sha256 is
+/// malformed, and is refused like any other malformed entry.
 function range(value) {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  const [off, len] = value;
+  if (!Array.isArray(value) || value.length < 2 || value.length > 3) return null;
+  const [off, len, sha256] = value;
   if (!Number.isInteger(off) || !Number.isInteger(len) || off < 0 || len < 0) return null;
-  return { off, len };
+  if (value.length === 2) return { off, len };
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(sha256)) return null;
+  return { off, len, sha256: sha256.toLowerCase() };
 }
 
 /// Read the reaction byte-range index out of a nuclide's parsed `version.json`.
@@ -353,6 +363,45 @@ export function spliceStream(parts, spans, bodies) {
   return out;
 }
 
+/// Hex sha256 of `bytes`, through WebCrypto, which browsers and Node both carry.
+///
+/// `crypto.subtle` exists only in a secure context. The page is one: GitHub
+/// Pages serves it over https, and `file://` and `localhost` count as secure. A
+/// page served over plain http from elsewhere has none, and is refused here
+/// rather than reading data it cannot check.
+export async function sha256Hex(bytes) {
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (!subtle) {
+    throw new Error("this page cannot check the nuclear data it downloads (no crypto.subtle): open it over https or from a file");
+  }
+  const digest = new Uint8Array(await subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// Check every part of a plan that carries a sha256 against the bytes fetched
+/// for it, and throw naming `what` and the part on the first that differs.
+///
+/// Per part rather than per span, because the hashes are per record batch: a
+/// coalesced span can carry several batches, and a batch nobody asked for
+/// that it swallowed is dropped by the splice unchecked. An index without
+/// hashes checks nothing, and says so by returning 0, the parts checked.
+export async function checkParts(plan, bodies, what) {
+  let checked = 0;
+  for (const part of plan.parts) {
+    if (!part.sha256) continue;
+    const i = plan.spans.findIndex((s) => part.off >= s.off && part.off + part.len <= s.off + s.len);
+    const body = i >= 0 ? bodies[i] : null;
+    if (!body) continue;
+    const from = part.off - plan.spans[i].off;
+    const got = await sha256Hex(body.subarray(from, from + part.len));
+    if (got !== part.sha256) {
+      throw new Error(`${what}: bytes ${part.off}+${part.len} do not match the sha256 its index gives`);
+    }
+    checked++;
+  }
+  return checked;
+}
+
 /// Assemble the files to hand the solver out of what came back.
 ///
 /// Here rather than in the fetch loop because this is the step whose mistakes
@@ -367,10 +416,16 @@ export function spliceStream(parts, spans, bodies) {
 /// order does not matter: spans are filed by the `spanIndex` their plan gave
 /// them, not by when they landed.
 ///
+/// Every batch whose index entry carries a sha256 is checked before it is
+/// spliced (`checkParts`), and a mismatch throws: a release is immutable, so
+/// bytes that differ from its index are damaged in transit or by something on
+/// the way, and a run on them would be a wrong answer rather than a gap.
+///
 /// Returns the items to hand over, the nuclides something was missing for, the
-/// bytes the indexes saved, and whether any ranged request came back as a whole
-/// object, which is the caller's cue to stop asking for ranges.
-export function assembleNuclideData(jobs, bytes, plans) {
+/// bytes the indexes saved, the batches checked against their sha256, and
+/// whether any ranged request came back as a whole object, which is the
+/// caller's cue to stop asking for ranges.
+export async function assembleNuclideData(jobs, bytes, plans) {
   const items = [];
   const missing = new Set();
   const bodies = new Map();
@@ -404,6 +459,7 @@ export function assembleNuclideData(jobs, bytes, plans) {
   }
 
   let saved = 0;
+  let checked = 0;
   for (const [nuclide, byFile] of plans) {
     for (const [file, plan] of byFile) {
       const k = key(nuclide, file);
@@ -411,6 +467,7 @@ export function assembleNuclideData(jobs, bytes, plans) {
       if (unranged.has(k)) {
         items.push({ nuclide, file, bytes: unranged.get(k) });
       } else if (got && got.every(Boolean)) {
+        checked += await checkParts(plan, got, `${nuclide} ${file}`);
         items.push({ nuclide, file, bytes: spliceStream(plan.parts, plan.spans, got) });
         saved += plan.full - plan.bytes;
       } else {
@@ -422,8 +479,73 @@ export function assembleNuclideData(jobs, bytes, plans) {
     }
   }
 
-  return { items, missing, saved, stripped };
+  return { items, missing, saved, checked, stripped };
 }
 
 /// The `Range` header for a span.
 export const rangeHeader = ({ off, len }) => `bytes=${off}-${off + len - 1}`;
+
+// --- the release layout -----------------------------------------------------
+//
+// Every library on the origin is published as immutable release folders and
+// one mutable pointer (core's yamc-nuclide/src/storage/release.rs):
+//
+//   <origin>/<keyword>/latest.json                 which release is current
+//   <origin>/<keyword>/<release>/manifest.json     every file, bytes and sha256
+//   <origin>/<keyword>/<release>/neutron/<Name>.arrow/...
+//   <origin>/<keyword>/<release>/transmutation/<subsection>.arrow/...
+//
+// What follows reads the two index objects and checks a file against them. The
+// fetching is app.js's.
+
+/// The `format_version`s of published data the vendored solver reads. Core's
+/// `SUPPORTED_FORMAT_VERSIONS`; widened when a re-vendor brings a reader for a
+/// new format.
+export const SUPPORTED_FORMAT_VERSIONS = [2];
+
+/// Parse a library's `latest.json` and check what the page relies on, throwing
+/// a message that names the library. A release in a format this solver does
+/// not read is refused here, before any of its files are fetched.
+export function parseLatest(text, keyword) {
+  let latest;
+  try {
+    latest = JSON.parse(text);
+  } catch {
+    throw new Error(`${keyword}/latest.json is not JSON`);
+  }
+  const fields = { release: "string", format_version: "number", manifest: "string", manifest_sha256: "string", manifest_bytes: "number" };
+  for (const [field, type] of Object.entries(fields)) {
+    if (typeof latest[field] !== type) throw new Error(`${keyword}/latest.json has no ${field}`);
+  }
+  if (!SUPPORTED_FORMAT_VERSIONS.includes(latest.format_version)) {
+    throw new Error(
+      `${keyword} release ${latest.release} is format_version ${latest.format_version}, ` +
+      `which this page's solver does not read (it reads ${SUPPORTED_FORMAT_VERSIONS.join(", ")}): ` +
+      "the page needs a re-vendor");
+  }
+  return latest;
+}
+
+/// Check a manifest's bytes against the pointer that named it and index its
+/// files by path, `neutron/Fe56.arrow/version.json` to `{ bytes, sha256 }`.
+export async function parseManifest(bytes, latest, keyword) {
+  if (bytes.length !== latest.manifest_bytes || await sha256Hex(bytes) !== latest.manifest_sha256.toLowerCase()) {
+    throw new Error(`${keyword} release ${latest.release}: manifest.json is not the one latest.json names`);
+  }
+  const manifest = JSON.parse(new TextDecoder().decode(bytes));
+  if (manifest.release !== latest.release || !Array.isArray(manifest.files)) {
+    throw new Error(`${keyword} release ${latest.release}: manifest.json does not describe that release`);
+  }
+  return new Map(manifest.files.map((f) => [f.path, { bytes: f.bytes, sha256: String(f.sha256).toLowerCase() }]));
+}
+
+/// Check a whole file against its manifest entry, throwing naming `what` when
+/// it differs. A file the manifest does not list (`entry` undefined) is not
+/// checked: the caller only asks for listed files when it has a manifest.
+export async function checkFile(bytes, entry, what) {
+  if (!entry) return false;
+  if (bytes.length !== entry.bytes || await sha256Hex(bytes) !== entry.sha256) {
+    throw new Error(`${what} is not the file its release manifest lists (size or sha256 differs)`);
+  }
+  return true;
+}

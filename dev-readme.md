@@ -37,16 +37,17 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 3.79 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 6.40 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 3.20 MB |
+| wasm (base64) | 5.73 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
-| page and application code | 0.14 MB |
+| page and application code | 0.18 MB |
+| spectrum presets | 0.03 MB |
 
 `plotly-basic` rather than the full bundle: every chart here is scatter or bar,
 which the basic distribution covers at a quarter of the size. It is gzipped
@@ -55,20 +56,27 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces more than core's CI does (2.40 MB for
-yani-core-0.17.0, against 2.11 MB for 0.11.0; the solver grew).
+so a local `wasm-pack build` produces more than core's CI does (4.30 MB for
+yani-core-0.21.0, against 2.40 MB for 0.17.0 and 2.11 MB for 0.11.0; the solver
+grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
 re-vendoring means downloading an asset rather than reproducing a toolchain. Core
 now tags one release for both of its cores, so the tag carries both names:
 
 ```bash
-gh release download 'yani-core-0.17.0,yamc-core-0.12.0' -R fusion-neutronics/core \
+gh release download 'yamc-core-0.16.0,yani-core-0.21.0' -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yani-core-0.17.0,yamc-core-0.12.0' > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yamc-core-0.16.0,yani-core-0.21.0' > vendor/CORE_COMMIT`.
+
+And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
+is where a changed export or signature would show. From yani-core-0.18.0 to
+0.21.0 only the doc comments moved: `run()` documents the `photon_continua` and
+`gas_production_appm` it now adds to each step, which the page does not read
+yet.
 
 The solver and the data move together. yani-core-0.17.0 reads `format_version`
 2, the 2026-09-18 republish that moved the union energy grids out of
@@ -76,6 +84,18 @@ The solver and the data move together. yani-core-0.17.0 reads `format_version`
 #109), and refuses a folder at version 1 rather than reading it with no grids;
 the release before it read version 1 and cannot read 2. The origin serves 2 for
 every library, so a page vendoring an older solver would fail every load.
+
+The format version is not the whole of it. yani-core-0.18.0, vendored here
+after 0.17.0, reads format 2 but refuses the decay data published since core
+began carrying the decay energy split (fusion-neutronics/core#155):
+"decay/nuclides.arrow has columns the schema does not declare", naming
+`decay_energy_alpha`, `decay_energy_beta`, `decay_energy_gamma` and their
+uncertainties. So with it every load stopped at the chain, against the origin
+and against core's fixtures alike; yani-core-0.21.0 reads that data. A release
+in a format the vendored solver does not read is refused before any of its
+files are fetched, since `latest.json` names its `format_version`
+(`SUPPORTED_FORMAT_VERSIONS` in `src/ranges.js`, core's own list, `2` for
+0.21.0); a schema change within a format shows only when the chain loads.
 
 ## Iterating without a build
 
@@ -145,6 +165,35 @@ Fetched from `yamc-data.xsplot.com` on demand. Which nuclides are needed is
 knowable before any of them are fetched, so the page reports the download budget
 up front rather than showing an open-ended spinner.
 
+### Reading from the current release
+
+Every library on the origin is published as immutable release folders and one
+mutable pointer (fusion-neutronics/core#309), the layout the `yani` wheel reads:
+
+```
+<keyword>/latest.json                     which release is current
+<keyword>/<release>/manifest.json         every file, with its size and sha256
+<keyword>/<release>/neutron/<Name>.arrow/...
+<keyword>/<release>/transmutation/<subsection>.arrow/...
+```
+
+Per library and once per session, the page reads `latest.json`, then the
+manifest it names, checked against the size and sha256 the pointer gives, and
+fetches every file from under that release's folder. A whole file is checked
+against its manifest line. A byte range is checked per record batch against the
+sha256 the index entry carries (fusion-neutronics/core#323), where it carries
+one, since the manifest's hash covers only the whole object. Bytes that differ
+stop the run rather than being solved. The checking is WebCrypto's
+`crypto.subtle`, which only a secure context has: https, `file://` and
+`localhost` are; a page served over plain http from elsewhere is refused rather
+than reading data it cannot check.
+
+The release is held for the session, so a pointer that moves mid-session cannot
+mix two releases into one answer, and a reload picks up the new one. A nuclide
+the manifest does not list is not asked for at all. A library with no
+`latest.json` is read from the unversioned paths it was published under before
+releases, unchecked; no other library is.
+
 ### Fetching one temperature of the MTs a run reads, rather than files
 
 `version.json` is fetched first for every nuclide, and the rest of that
@@ -157,6 +206,8 @@ fixture with an Fe56 material, 441 of the 462 nuclides in the closure are not in
 the fixture set, and the run makes 656 nuclide-data requests where three per
 nuclide would be 1386. Against the origin itself it buys nothing on ENDF/B-8.1,
 which publishes every one of the 462; it is there for the libraries with gaps.
+With a release manifest the page no longer asks: a nuclide the manifest does not
+list gets no request, and the same fixture run makes no 404s at all.
 
 The second is the indexes. Each `version.json` carries two: `reaction_ranges`,
 the byte range of every record batch inside `reactions.arrow`, keyed by MT and
@@ -232,6 +283,11 @@ temperatures, where before they touched), the grids 32 MB in 785, `version.json`
 same run takes 38 s with 12 in flight, 26 s with 24 and 21 s with 48, and no
 less beyond that. A range request costs its round trip, not its bytes.
 
+Read from a release, the same run on yani-core-0.21.0 against ENDF/B-8.1
+release 2026-10-12.1, where the closure is 465 nuclides, all published, made
+5582 requests for 158.9 MB in 48 s: `latest.json`, the manifest and 5580 files
+under the release folder, none outside it and not one 404.
+
 Measured end to end by `node verify.mjs`, on the SFR chain fixture with an Fe56
 material: **4.9 MB across 173 range requests where the whole files are
 177.5 MB**, over 21 nuclides and both files, and the answer is
@@ -239,6 +295,20 @@ material: **4.9 MB across 173 range requests where the whole files are
 the whole-file path gives at that temperature. The same setup through the wheel
 at 294 K gives 4.43825873407959e14 Bq against the page's 4.43825873407960e14,
 which is the last bit.
+
+On yani-core-0.21.0 and core's current fixtures (release 2026-10-12.1) the same
+check reads **6.9 MB across 216 range requests where the whole files are
+212.7 MB**, over 24 nuclides, and answers 2.1891e14 Bq and 7.551e3 Gy/h. The
+same setup through the wheel (yani-core 0.21.0, on the same fixture files) gives
+218909479821531.5 Bq against the page's 218909479821531.47, the last bit again,
+and the same contact dose to every digit, 7550.812379468497 Gy/h. The answer
+halved because the default spectrum changed, not the solver: the figures above
+were taken on the coarse "Fusion first wall" shape that was then the default,
+which put 55% of its flux above 5 MeV, where the HCPB first-wall spectrum that is
+the default now (see "Spectrum presets") puts 14%, and Fe56's activation
+channels, (n,p) to Mn56 among them, are threshold reactions. The page as it was
+then, with yani-core-0.21.0 swapped in, still answers 4.438e14 Bq and
+2.711e4 Gy/h on the same fixtures.
 
 A nuclide that publishes *none* of the wanted MTs plans nothing but the reaction
 schema, and that plan is kept rather than dropped: the solver reads a
@@ -317,6 +387,13 @@ before the 2026-09-18 republish is `format_version` 1, which the vendored
 solver refuses ("Unsupported Arrow format version"); the script re-fetches a
 cache whose `data_version` no longer matches, so re-running it is the fix. The
 fixture server in `verify.mjs` honours `Range` and answers 206.
+
+It serves them as a release, the way the origin does: a `latest.json` naming a
+release called `fixtures`, its manifest listing every file with its size and
+sha256, and the files under `<keyword>/fixtures/`, one tree answering for every
+keyword. A `version.json` whose index entries carry no sha256 has them added as
+it is served, so the per-batch check runs on every range the page fetches. A
+request outside the release layout is counted, and the check requires none.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default
@@ -526,7 +603,9 @@ question a dose answers is whether the thing can be handled, and the second is
 what is driving it. Absorbed dose in air at a build-up
 factor of 2.0, which is what `Material.contact_dose()` defaults to in the wheel,
 so the page and a Python run of the same setup report the same number:
-2.711e4 Gy/h against 2.710833e4 for the Fe56 check, Mn56 in both.
+7550.812379468497 Gy/h from both for the Fe56 check on yani-core-0.21.0, Mn56
+leading in both (2.711e4 against 2.710833e4 before the default spectrum
+changed).
 Bremsstrahlung from decay electrons is not modelled, so a strong beta emitter
 reads low.
 
@@ -565,6 +644,11 @@ activity, and 2.711e4 Gy/h peak contact dose. The same setup run through the
 default, which is the lowest published temperature, reproduces to the last bit
 what the page answered before it fetched one temperature. (An earlier version of
 this check agreed to 2.1e-10, which is how the composition bug above was found.)
+On yani-core-0.21.0 it was run again, against ENDF/B-8.1 release 2026-10-12.1
+with the page served from `localhost`: 2.1895e14 Bq peak activity and
+7.555e3 Gy/h peak contact dose on the default HCPB spectrum, where the wheel
+(yani-core 0.21.0, 294 K, the same data) gives 218953519632458.28 Bq against the
+page's 218953519632458.25, the last bit, and 7554.745102195669 Gy/h from both.
 Firefox and WebKit last ran the page end to end on the solver vendored before
 yani-core-0.11.0, where all three engines agreed to the last digit; only
 Chromium is installed here, so that is what this release was checked against.
