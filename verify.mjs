@@ -23,7 +23,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import {
   COALESCE_GAP, assembleNuclideData, energyRanges, kelvin, nearestTemperature, planEnergyFetch,
   planFetch, planNuclide, publishedTemperatures, rangeHeader, reactionRanges, spliceStream,
-  checkFile, checkParts, parseLatest, parseManifest, sha256Hex, SUPPORTED_FORMAT_VERSIONS,
+  checkFile, checkParts, latestUrl, parseLatest, parseManifest, sha256Hex, SUPPORTED_FORMAT_VERSIONS,
   wantedParts,
 } from "./src/ranges.js";
 import { SPECTRA } from "./src/spectra.js";
@@ -101,9 +101,11 @@ async function withRangeHashes(bytes, folder) {
 
 /// The fixture answer to a data-origin URL, `{ path, body }`, or null for
 /// anything the release does not carry. A URL in the unversioned layout the
-/// page used before releases is null too, and counted by the caller.
+/// page used before releases is null too, and counted by the caller. Matched
+/// by path, as the origin matches it, so the query the page puts on
+/// `latest.json` to get past the CDN edge's copy is answered as the pointer.
 async function fixtureBody(url) {
-  const m = url.slice(ORIGIN.length + 1).match(/^([^/]+)\/(.+)$/);
+  const m = new URL(url).pathname.slice(1).match(/^([^/]+)\/(.+)$/);
   if (!m) return null;
   const [, keyword, rest] = m;
   const { bodies, listed } = await fixtureFiles();
@@ -572,6 +574,16 @@ async function checkHashes() {
   }
   eq(await checkParts(plan, plan.spans.map((sp) => slice(file, sp)), "Fe56"), plan.parts.length, "checkParts counts what it checked");
 
+  // The pointer is asked for at its own path, with a query the CDN edge has
+  // not seen, new on every call. The browser run below checks that the page's
+  // requests are these.
+  const pointerUrl = new URL(latestUrl(ORIGIN, "endf-b8.1"));
+  eq(`${pointerUrl.origin}${pointerUrl.pathname}`, `${ORIGIN}/endf-b8.1/latest.json`, "latest.json is asked for at the pointer's path");
+  if (/^\?release-check=[0-9a-f]{16}$/.test(pointerUrl.search)) ok("with a release-check query of 16 hex digits");
+  else fail(`latest.json is asked for with ${pointerUrl.search || "no query"}, not ?release-check=<16 hex digits>`);
+  if (new URL(latestUrl(ORIGIN, "endf-b8.1")).search !== pointerUrl.search) ok("and a new value on every call");
+  else fail("two calls asked for latest.json with the same value");
+
   // The release pointer and manifest, the way the origin publishes them.
   const manifestBytes = new TextEncoder().encode(JSON.stringify({
     keyword: "endf-b8.1", release: "r1", format_version: 2,
@@ -775,9 +787,30 @@ async function main() {
   // Requests in the unversioned layout from before releases, which the page
   // should no longer make at all.
   let unversioned = 0;
+  // The query of every `latest.json` request, and every other request that
+  // carried one. The pointer has to be asked for past the CDN edge's copy,
+  // which can name a deleted release for days, each time with a value of its
+  // own. The manifest and the release's files are immutable and asked for
+  // plainly, so that the edge caches them.
+  const pointerQueries = [];
+  const queried = [];
+  const checkPointers = (when) => {
+    const busted = pointerQueries.filter((q) => /^\?release-check=[0-9a-f]{16}$/.test(q));
+    if (pointerQueries.length && busted.length === pointerQueries.length) {
+      ok(`${when}, every latest.json request carries a release-check query (${pointerQueries.length})`);
+    } else {
+      fail(`${when}, latest.json was asked for ${pointerQueries.length} time(s), ${busted.length} with a ` +
+        `release-check query: ${pointerQueries.map((q) => q || "(none)").join(", ")}`);
+    }
+    eq(new Set(pointerQueries).size, pointerQueries.length, "with distinct values");
+    eq(queried.length, 0, `and manifest and release-file requests with a query${queried.length ? ` (${queried.slice(0, 3).join(", ")})` : ""}`);
+  };
   await page.route(`${ORIGIN}/**`, async (route) => {
     const found = await fixtureBody(route.request().url());
-    if (!/^[^/]+\/(latest\.json|fixtures\/)/.test(route.request().url().slice(ORIGIN.length + 1))) unversioned++;
+    const { pathname, search } = new URL(route.request().url());
+    if (!/^\/[^/]+\/(latest\.json$|fixtures\/)/.test(pathname)) unversioned++;
+    if (pathname.endsWith("/latest.json")) pointerQueries.push(search);
+    else if (search) queried.push(`${pathname}${search}`);
     const path = found && found.path;
     if (!found) {
       // A 404 is the honest answer for a nuclide this fixture set does not
@@ -1061,6 +1094,7 @@ async function main() {
   // under the release folder. Nuclides the manifest does not list are not
   // asked for at all, so the 404s above are what is left after that.
   eq(unversioned, 0, "requests outside the release layout");
+  checkPointers("in the first run");
 
   // Whether the run fetched MTs or whole files. Both are correct -- the whole
   // file is the fallback and has to keep working -- so this reports rather than
@@ -1526,6 +1560,8 @@ async function main() {
   else fail(`changing a chain library made ${fetched() - beforeChain} requests`);
   if (rechained === base) ok("and, from the same fixtures, gives the same answer");
   else fail(`the rechained run gave ${rechained.toExponential(6)} against ${base.toExponential(6)}`);
+  // A second keyword's pointer, resolved by the page for the new library.
+  checkPointers("after the chain library change");
   await page.selectOption("#data-decay", "endf-b8.1");
   await solve();
   const beforeSettled = fetched();

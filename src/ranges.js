@@ -503,6 +503,22 @@ export const rangeHeader = ({ off, len }) => `bytes=${off}-${off + len - 1}`;
 /// new format.
 export const SUPPORTED_FORMAT_VERSIONS = [2];
 
+/// The URL to ask for a library's `latest.json`: the pointer's path with a
+/// `release-check` query of 16 random hex digits, new on every call.
+///
+/// The pointer is the one object on the origin that changes, and the CDN edge
+/// can go on serving an old copy of it for days, whatever the pointer's own
+/// Cache-Control says: on 2026-10-17 it named a release that had been deleted,
+/// so every file under it was a 404. The edge keys its cache on the query
+/// string, so a value it has not seen is answered by the origin. Core's
+/// clients ask the same way (`yamc_nuclide::storage::release::pointer_url`).
+/// The manifest and the release's files are immutable, and are asked for
+/// plainly so the edge goes on caching them.
+export function latestUrl(origin, keyword) {
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${origin}/${keyword}/latest.json?release-check=${nonce}`;
+}
+
 /// Parse a library's `latest.json` and check what the page relies on, throwing
 /// a message that names the library. A release in a format this solver does
 /// not read is refused here, before any of its files are fetched.
