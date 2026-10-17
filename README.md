@@ -17,6 +17,21 @@ temperature the material is at, in byte ranges out of the published files rather
 than the files themselves, which is about thirty times less to download for the
 same answer.
 
+## Python in the browser
+
+The **Python** tab beside the form is an editor that runs `yani` scripts in
+the page, on [Pyodide](https://pyodide.org): the `yani-core` wheel itself,
+installed from PyPI, so a script there is a script that runs under
+`pip install yani`. It covers what the form does not: loops over materials or
+schedules, custom post-processing, anything the API can do. Figures from
+plotly or matplotlib, and anything with a rich display such as a `Material`,
+are drawn beside the editor. **Open it in the Python tab** turns the form's
+setup into a script there; **Share** puts the script in a link.
+
+Nothing of it loads until the tab is first opened, so the form starts as fast
+as it always has. The tab needs the page served over http(s): it works on the
+published page, not on a copy opened from a file.
+
 ## The same solver, locally
 
 The Python package is the same solver without the browser's constraints --

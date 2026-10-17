@@ -1098,6 +1098,18 @@ async function sessionDocument(session) {
   doc.querySelector("#material-steps").hidden = true;
   doc.querySelector("#warning").hidden = true;
   doc.querySelector("#progress").hidden = true;
+  // Back on the form, with the Python tab as it is before it is first opened:
+  // the file opens from disk, where the Python tab cannot start anyway.
+  doc.querySelector("#form-mode").hidden = false;
+  doc.querySelector("#script-mode").hidden = true;
+  doc.querySelector("#script-unavailable").hidden = true;
+  for (const b of doc.querySelectorAll(".modes [data-mode]")) b.setAttribute("aria-selected", String(b.dataset.mode === "form"));
+  for (const id of ["py-example", "py-editor", "py-output", "py-plots", "py-data", "py-plot-count"]) {
+    doc.querySelector(`#${id}`).replaceChildren();
+  }
+  doc.querySelector("#py-status").textContent = "Starting";
+  for (const b of doc.querySelectorAll("[data-pytab]")) b.setAttribute("aria-selected", String(b.dataset.pytab === "output"));
+  for (const p of doc.querySelectorAll("[data-pypanel]")) p.hidden = p.dataset.pypanel !== "output";
   const payload = document.createElement("script");
   payload.type = "application/json";
   payload.id = "yani-session";
@@ -1206,10 +1218,82 @@ async function run() {
   }
 }
 
+// --- the Python tab -------------------------------------------------------
+
+/// script.js, imported the first time the Python tab is opened and never
+/// before: it is what brings CodeMirror, Pyodide and the yani-core wheel, which
+/// a visitor using only the form should not wait for or download. It sits
+/// beside the page rather than inside it, so it needs the page served over
+/// http(s); a page opened from a file says so instead.
+let scriptMode = null;
+function loadScriptMode() {
+  if (!scriptMode) {
+    scriptMode = import("./script.js").catch((e) => {
+      scriptMode = null;
+      throw e;
+    });
+  }
+  return scriptMode;
+}
+
+function scriptUnavailable(text) {
+  const note = $("script-unavailable");
+  note.textContent = text;
+  note.hidden = false;
+}
+
+/// Switch between the form and the Python tab. Answers the editor's module
+/// once the Python tab is up, or null.
+async function showMode(mode) {
+  for (const b of document.querySelectorAll(".modes [data-mode]")) {
+    b.setAttribute("aria-selected", String(b.dataset.mode === mode));
+  }
+  $("form-mode").hidden = mode !== "form";
+  $("script-mode").hidden = true;
+  $("script-unavailable").hidden = true;
+  if (mode !== "python") return null;
+  if (!/^https?:$/.test(location.protocol)) {
+    scriptUnavailable(
+      "The Python tab runs on Pyodide, which a page opened from a file cannot start. " +
+      "It works on https://fusion-neutronics.github.io/yani-online/, or on a copy served over http.");
+    return null;
+  }
+  $("script-mode").hidden = false;
+  try {
+    return await loadScriptMode();
+  } catch (e) {
+    $("script-mode").hidden = true;
+    scriptUnavailable(`The Python tab could not load: ${e.message || e}`);
+    return null;
+  }
+}
+
+function wireModes() {
+  for (const b of document.querySelectorAll(".modes [data-mode]")) {
+    b.addEventListener("click", () => showMode(b.dataset.mode));
+  }
+  // The form's setup, as a script, in the editor. The same script the
+  // download writes, except that it draws its figures in the page.
+  $("open-python").addEventListener("click", async () => {
+    try {
+      warn("");
+      const text = pythonScript(await currentSetup(), { browser: true });
+      const editor = await showMode("python");
+      if (editor) editor.openCode(text);
+    } catch (e) {
+      warn(`Cannot write the script: ${e.message || e}`);
+    }
+  });
+  // A share link carries its code in the hash, and opens on the editor.
+  if (new URLSearchParams(location.hash.slice(1)).has("code")) showMode("python");
+}
+
 // --- wiring ---------------------------------------------------------------
 
 function wireTabs() {
-  for (const tablist of document.querySelectorAll('[role="tablist"]')) {
+  // The form's own tab strips. The Form/Python switch and the Python tab's
+  // strip are not in a panel and are wired where they live.
+  for (const tablist of document.querySelectorAll('.panel [role="tablist"]')) {
     tablist.addEventListener("click", (e) => {
       const btn = e.target.closest('[role="tab"]');
       if (!btn) return;
@@ -1313,6 +1397,7 @@ function renderSchedule() {
 
 async function main() {
   wireTabs();
+  wireModes();
   wireSpectrumPresets();
   wireDataDropdowns();
   renderComposition();

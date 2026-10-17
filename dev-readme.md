@@ -25,7 +25,8 @@ node build.mjs
 ```
 
 Whichever route, `node build.mjs` is what turns `vendor/` and `src/` into
-`dist/index.html`.
+`dist/index.html`, and puts the Python tab's files beside it (see "The Python
+tab" below).
 
 The solver was mis-reading nuclide names until recently: `Fe56` reached the
 formula parser first and came back as Fe with a subscript of 56, which expands
@@ -686,6 +687,146 @@ the data origin unreachable, and requires the run to be there: the same peak
 activity to the last digit, the same schedule, material, temperature and
 preset, the stepped charts sized to the run, and no request for data.
 
+## The Python tab
+
+An editor that runs `yani` scripts in the page, on Pyodide, beside the form
+(fusion-neutronics/yani-online#38).
+
+| | |
+| --- | --- |
+| `src/script.js` | The tab: CodeMirror, the examples menu, Share and Download, the worker's lifecycle, the Output, Plots and Data tabs. |
+| `src/script-worker.js` | Pyodide, installing yani-core, the nuclear-data fetcher, installing what a script imports, running scripts, `show()`. |
+| `src/fetcher.js` | The worker's helper that fetches a batch of nuclear-data requests concurrently. |
+| `examples/*.py` | The examples menu. Each opens with `# Title: description`, and runs as it is under `pip install yani plotly`. |
+| `vendor/PYODIDE_VERSION`, `vendor/YANI_CORE_VERSION` | The Pyodide release and the yani-core release the tab installs. |
+| `vendor/codemirror.js`, `vendor/coi-serviceworker.min.js` | Copied from yamc-online's `vendor/`. |
+| `serve.mjs` | Static server for `dist/`, with fixtures under `/fixtures/` as a data release. |
+| `scripts/fetch-fixtures.mjs` | Downloads what the tab's checks run against, from the current release. |
+
+**Shared with yamc-online, by copy.** The worker, the fetch helper, the page
+side of the editor, `serve.mjs` and `fetch-fixtures.mjs` started as copies of
+yamc-online's and keep its structure, so a fix in one is easy to carry to the
+other; `fetcher.js` and the CodeMirror bundle are unchanged. Copying rather
+than sharing a package is deliberate: the two pages differ in what is around
+the editor (here it is a tab beside a form that must keep its fast start), and
+neither repository builds with npm. `vendor/codemirror.js` is rebuilt in
+yamc-online (`scripts/vendor-codemirror.mjs`) and copied here; it is the
+CodeMirror 6 bundle with the Python mode, whose completion of keywords and the
+script's own names is extended here with yani's API, listed by the worker
+from the installed package.
+
+**Loaded on first open, not before.** The form is still the one file
+`node build.mjs` inlines. The tab is not in it: app.js imports `./script.js`
+the first time the tab is opened, and that brings CodeMirror (0.45 MB), then
+the worker brings Pyodide from the jsDelivr CDN and the yani-core wheel
+(3.3 MB) from PyPI. A visitor who only uses the form fetches none of it, which
+`verify.mjs` checks by watching the requests. The form's start is unchanged:
+180 ms from `file://` to "Ready", median of five, on this branch and on main
+alike, and 200 to 210 ms over http. A page opened from a file says the tab
+needs http(s), since a module worker cannot start from `file://`.
+
+**yani-core from PyPI.** As in yamc-online: the worker reads PyPI's JSON API
+for the pinned version, picks the wheel whose tag is the ABI in Pyodide's lock
+file (`pyemscripten_2026_0_wasm32`), checks PyPI's sha256, and installs the
+bytes with micropip, fetching the wheel while Pyodide boots. Core publishes it
+with every yani-core release (fusion-neutronics/core#346). `node build.mjs
+--wheel <path>` puts a local Pyodide wheel in `dist/` and installs that instead,
+to try an unreleased core or to work offline; never publish a page built that
+way. Building one is `pyodide build` in core's `packages/yani-core` with
+`MATURIN_PEP517_ARGS=--no-default-features`, as yamc-online's dev-readme
+describes for yamc-core.
+
+**Nuclear data, through the wheel.** The tab does not fetch data itself. The
+wheel's downloader is the same Rust as a native `pip install yani`, reading the
+release layout: `<keyword>/latest.json` names the current release, its
+`manifest.json` lists every file with its size and sha256, and files come from
+`<keyword>/<release>/...` and are checked against it. Its GETs go to the page
+through `yani._core._set_data_fetcher` (the hook yamc-core's wheel shares), in
+batches that `fetcher.js` has in flight together while the Python worker
+waits in `Atomics.wait`; a single request, or any on a page that is not
+cross-origin isolated, is a synchronous `XMLHttpRequest`. Files land in
+Emscripten's in-memory filesystem, so reruns fetch nothing. The downloader's
+`Downloaded 4 of 9 nuclides` lines collapse into one, and show in the status
+bar.
+
+The form's own fetches are untouched by this, and still read the unversioned
+layout (`<keyword>/neutron/...`); moving them to the release layout is separate
+work.
+
+**Plots.** `show(obj)` draws a plotly figure (with plotly.js inlined from the
+plotly package, so the frame needs no network and Save .html opens anywhere), a
+matplotlib figure (as SVG), or anything with `_repr_html_`, such as a
+`Material`, in an `<iframe sandbox="allow-scripts">`. `figure.show()` and
+`plt.show()` draw there too. Every top-level expression line with a display is
+drawn where it stands, as in a notebook, except a method answering the object
+it was called on (plotly's `add_scatter`, `update_layout`), which is building
+a figure rather than asking to see it. A package a script imports that Pyodide
+lacks, such as plotly, is installed with micropip before the run (plotly from
+PyPI, about 10 MB, once per session).
+
+**Stop** interrupts Python through Pyodide's interrupt buffer; a
+transmutation is one call into Rust that never looks at it, so after 1.5 s
+Stop restarts Python instead. Both need cross-origin isolation, which GitHub
+Pages gets from `coi-serviceworker` (one reload on a first visit, loaded only
+over http(s)). The form does not need it and is unaffected by it: it fetches
+nothing cross-origin without CORS.
+
+**The form's setup in the editor.** **Open it in the Python tab** writes the
+same script **Download this setup as Python** does, except that its figures
+are drawn with `figure.show()` rather than written to files, and puts it in
+the editor (asking first if that would replace code the user wrote).
+
+### Checking it
+
+```bash
+npm ci
+node build.mjs [--wheel ../core/packages/yani-core/dist/yani_core-...whl]
+node scripts/fetch-fixtures.mjs        # once: Fe56, lithium and the chain, 58 MB
+YANI_FIXTURES=.fixtures node verify.mjs
+node serve.mjs                         # http://localhost:8000/, ?data=/fixtures/ for the fixtures
+```
+
+`verify.mjs` serves `dist/` over http (cross-origin isolated) and checks that
+the form starts without loading any of the tab and that the first open does;
+the iron example's activity and decay heat at every step, its plotly figure,
+the batched download and its counter, and that a rerun fetches nothing; the
+form's setup opened in the editor and run, drawing its five figures; a figure
+line partway down a script; completion of yani's names; tracebacks, Stop and
+share links; and that nothing but Pyodide's CDN and PyPI is fetched from
+another origin. `--live` also runs the iron example against the published
+release and compares it with the native wheel's rows. With
+`YANI_FIXTURES=.fixtures` the form's own transmutation is skipped, as it is in
+CI, since it needs core's fixtures in core's layout.
+
+Measured here (yani-core 0.21.0 built from core main, Pyodide 314.0.7,
+Chromium): the first open of the tab is 6 to 13 s, nearly all of it Pyodide and
+the wheel coming over the network. The iron example on the fixtures is 10 s
+including plotly's install. Against the published release (2026-10-10.1) it
+fetched **196.6 MB in 92 requests in 210 s** and printed the same rows as the
+native wheel (`pip install` of the same core: 5.9805e+14 Bq and 144.60 W at
+shutdown, Mn56; 1.9255e+13 Bq and 0.018027 W ten years on, Fe55); the native
+run's cache holds about the same, 197 MB. Iron's closure reaches 20 nuclides
+with published cross sections.
+
+That download is whole files. The wheel reads byte ranges only where every
+index entry it needs carries a sha256 to check the bytes against, and release
+2026-10-10.1's `version.json`s carry the indexes without the hashes, so Fe56's
+39 MB `reactions.arrow` comes whole where its 294 K activation channels are a
+small part of it. Against the fixtures, which `serve.mjs` gives the hashes, the
+same example fetches 21.7 MB. A release republished with the hashes brings the
+live figure down the same way, with no change here.
+
+Same numbers as the form: on core's fixtures, the form (with a yani-wasm built
+from the same core) and the form's script run in the Python tab give the same
+peak activity for the Fe56 check to a part in 1e15: 218914056970099.3 Bq in
+the form, 218914056970099.28 in the script. The form's vendored solver (yani-core 0.18.0) cannot run that check
+today: it refuses the decay data now published, and core's fixtures, with
+"decay/nuclides.arrow has columns the schema does not declare". That is the
+vendored wasm being older than the data, and wants a re-vendor from a current
+core release.
+
 Not yet done:
 
-- nothing outstanding from the original list
+- the form's fetches still read the unversioned layout; moving them to the
+  release layout is separate
+- the vendored form solver predates the decay data now published (above)
