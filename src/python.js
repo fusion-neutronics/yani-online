@@ -65,7 +65,7 @@ function materialSource(material, temperature) {
     composition,
     "    },",
     `    ${num(material.density)},`,
-    `    units=${str(material.units)},`,
+    `    density_units=${str(material.units)},`,
     `    fraction_type=${str(material.fractionType)},`,
     `    volume=${num(material.volume)},  # cm^3, required for activity and decay heat`,
     `    temperature=${num(temperature)},  # K, what the cross sections are read at`,

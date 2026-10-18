@@ -57,21 +57,21 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces more than core's CI does (4.30 MB for
-yani-core-0.21.0, against 2.40 MB for 0.17.0 and 2.11 MB for 0.11.0; the solver
-grew).
+so a local `wasm-pack build` produces more than core's CI does (4.35 MB for
+yani-core-0.21.1, against 4.30 MB for 0.21.0, 2.40 MB for 0.17.0 and 2.11 MB
+for 0.11.0; the solver grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
 re-vendoring means downloading an asset rather than reproducing a toolchain. Core
 now tags one release for both of its cores, so the tag carries both names:
 
 ```bash
-gh release download 'yamc-core-0.16.0,yani-core-0.21.0' -R fusion-neutronics/core \
+gh release download 'yamc-core-0.16.1,yani-core-0.21.1' -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yamc-core-0.16.0,yani-core-0.21.0' > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yamc-core-0.16.1,yani-core-0.21.1' > vendor/CORE_COMMIT`.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
 is where a changed export or signature would show. From yani-core-0.18.0 to
@@ -96,7 +96,7 @@ and against core's fixtures alike; yani-core-0.21.0 reads that data. A release
 in a format the vendored solver does not read is refused before any of its
 files are fetched, since `latest.json` names its `format_version`
 (`SUPPORTED_FORMAT_VERSIONS` in `src/ranges.js`, core's own list, `2` for
-0.21.0); a schema change within a format shows only when the chain loads.
+0.21.1); a schema change within a format shows only when the chain loads.
 
 ## Iterating without a build
 
