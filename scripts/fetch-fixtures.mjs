@@ -12,8 +12,9 @@
 // release, byte for byte, each checked against the release manifest's sha256.
 // Only the sections an activation load reads are fetched.
 //
-// The form's own checks in verify.mjs do not read these: they need core's
-// fixtures, in core's layout, and skip the run without them.
+// The form's own checks in verify.mjs need core's fixtures, in core's layout,
+// and skip without them. The Python tab's checks do run the form once on these,
+// on Fe56, to hold it to its script's numbers.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
