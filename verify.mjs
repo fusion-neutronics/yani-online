@@ -8,12 +8,13 @@
 //
 //   node verify.mjs [--headed] [--live [Nuclide ...]]
 //
-// `--live` adds a check against the real data origin: that the published
-// byte-range indexes describe the published objects, that ranges are honoured,
-// and that a stream spliced at one temperature is byte-for-byte the whole
-// file's bytes; and runs the Python tab's iron example against the published
-// release. It is the only part that needs the network, apart from the Python
-// tab's Pyodide (from its CDN) and yani-core and plotly (from PyPI).
+// `--live` adds a check against the real data origin, on the release its
+// `latest.json` names: that the published byte-range indexes and their sha256s
+// describe the published objects, that ranges are honoured, and that a stream
+// spliced at one temperature is byte-for-byte the whole file's bytes; and runs
+// the Python tab's iron example against the published release. It is the only
+// part that needs the network, apart from the Python tab's Pyodide (from its
+// CDN) and yani-core and plotly (from PyPI).
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
@@ -632,6 +633,14 @@ async function checkHashes() {
 /// a stream spliced at one temperature is byte-for-byte the bytes the
 /// whole-file path would have read, for the reactions and for the grids.
 ///
+/// It reads the current release the way the page and the wheel do:
+/// `latest.json`, the manifest it names, then the nuclide's files under the
+/// release folder. Each whole file is checked against its manifest line and
+/// each fetched batch against the sha256 its index gives, which the wheel
+/// needs on every batch before it reads byte ranges at all. The unversioned
+/// `<keyword>/neutron/...` paths this read before releases are gone from the
+/// origin.
+///
 /// Byte-exactness is the claim rather than "it decodes", because there is
 /// nothing here that decodes Arrow. It was confirmed once with pyarrow that a
 /// byte-exact splice of these ranges opens as a stream and yields record
@@ -655,12 +664,43 @@ async function checkLive(names) {
     195, 196, 197, 198, 199, 200,
   ]);
 
-  /// Fetch a plan's spans, requiring 206 with exactly the bytes asked for, and
-  /// compare the splice against the object fetched whole.
-  async function checkFile(nuclide, base, file, plan) {
+  // The release, found as the page finds it. Anything that goes wrong here or
+  // below is a failure reported and passed: thrown, it would stop verify
+  // before the Python tab's own live check, which is how a layout change on
+  // the origin once hid that check.
+  let latest;
+  let listed;
+  try {
+    latest = parseLatest(await (await fetch(latestUrl(ORIGIN_LIVE, library))).text(), library);
+    const manifestResp = await fetch(`${ORIGIN_LIVE}/${library}/${latest.manifest}`);
+    listed = await parseManifest(new Uint8Array(await manifestResp.arrayBuffer()), latest, library);
+  } catch (e) {
+    fail(`live: the current release of ${library}: ${e.message || e}`);
+    return;
+  }
+  ok(`live: ${library} release ${latest.release}, ${listed.size} files in its manifest`);
+  const releaseUrl = `${ORIGIN_LIVE}/${library}/${latest.release}`;
+
+  /// Whether `bytes` are the file the manifest lists at `path`, failing with
+  /// why when they are not.
+  async function listedAs(bytes, path, what) {
+    try {
+      if (await checkFile(bytes, listed.get(path), what)) return true;
+      fail(`${what}: release ${latest.release} does not list ${path}`);
+    } catch (e) {
+      fail(e.message);
+    }
+    return false;
+  }
+
+  /// Fetch a plan's spans, requiring 206 with exactly the bytes asked for,
+  /// check every batch against its sha256, and compare the splice against the
+  /// object fetched whole.
+  async function checkSplice(nuclide, folder, file, plan) {
+    const url = `${releaseUrl}/${folder}/${file}`;
     const bodies = [];
     for (const span of plan.spans) {
-      const resp = await fetch(`${base}/${file}`, { headers: { Range: rangeHeader(span) } });
+      const resp = await fetch(url, { headers: { Range: rangeHeader(span) } });
       if (resp.status !== 206) {
         fail(`${nuclide} ${file}: ${rangeHeader(span)} answered ${resp.status}, not 206`);
         return;
@@ -675,9 +715,23 @@ async function checkLive(names) {
     ok(`${nuclide} ${file}: ${plan.spans.length} ranges answered 206 exactly, ` +
        `${(plan.bytes / 1048576).toFixed(2)} MB of ${(plan.full / 1048576).toFixed(2)} MB ` +
        `(${(plan.full / plan.bytes).toFixed(1)}x less)`);
+    try {
+      const checked = await checkParts(plan, bodies, `${nuclide} ${file}`);
+      if (checked === plan.parts.length) {
+        ok(`${nuclide} ${file}: all ${checked} batches match the sha256 their index gives`);
+      } else {
+        fail(`${nuclide} ${file}: ${plan.parts.length - checked} of ${plan.parts.length} batches have no sha256 ` +
+          "in the index, so the wheel would read the whole file");
+      }
+    } catch (e) {
+      fail(e.message);
+    }
 
     const stream = spliceStream(plan.parts, plan.spans, bodies);
-    const whole = new Uint8Array(await (await fetch(`${base}/${file}`)).arrayBuffer());
+    const whole = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    if (await listedAs(whole, `${folder}/${file}`, `${nuclide} ${file}`)) {
+      ok(`${nuclide} ${file}: the whole file is the one the manifest lists`);
+    }
 
     // Every part, in the order the stream carries them, against the same bytes
     // of the object fetched whole.
@@ -695,20 +749,26 @@ async function checkLive(names) {
   }
 
   for (const nuclide of names) {
-    const base = `${ORIGIN_LIVE}/${library}/neutron/${nuclide}.arrow`;
-    const version = await (await fetch(`${base}/version.json`)).json();
-    const plan = planNuclide(version, wantedMts, 294);
-    if (!plan.reactions) {
-      fail(`${nuclide}: version.json carries no reaction_ranges this build can plan from`
-        + (version.reaction_ranges
-          ? " (it has one in the shape from before fusion-neutronics/core#100; reindex it)"
-          : ""));
-      continue;
+    try {
+      const folder = `neutron/${nuclide}.arrow`;
+      const versionBytes = new Uint8Array(await (await fetch(`${releaseUrl}/${folder}/version.json`)).arrayBuffer());
+      if (!await listedAs(versionBytes, `${folder}/version.json`, `${nuclide} version.json`)) continue;
+      const version = JSON.parse(new TextDecoder().decode(versionBytes));
+      const plan = planNuclide(version, wantedMts, 294);
+      if (!plan.reactions) {
+        fail(`${nuclide}: version.json carries no reaction_ranges this build can plan from`
+          + (version.reaction_ranges
+            ? " (it has one in the shape from before fusion-neutronics/core#100; reindex it)"
+            : ""));
+        continue;
+      }
+      ok(`${nuclide}: planned at ${plan.temperature} for 294 K`);
+      await checkSplice(nuclide, folder, "reactions.arrow", plan.reactions);
+      if (plan.energy) await checkSplice(nuclide, folder, "energy.arrow", plan.energy);
+      else fail(`${nuclide}: version.json carries no energy_ranges, so the grids would be fetched whole`);
+    } catch (e) {
+      fail(`live: ${nuclide}: ${e.message || e}`);
     }
-    ok(`${nuclide}: planned at ${plan.temperature} for 294 K`);
-    await checkFile(nuclide, base, "reactions.arrow", plan.reactions);
-    if (plan.energy) await checkFile(nuclide, base, "energy.arrow", plan.energy);
-    else fail(`${nuclide}: version.json carries no energy_ranges, so the grids would be fetched whole`);
   }
 }
 
@@ -1670,6 +1730,49 @@ const PYODIDE_CDN = "https://cdn.jsdelivr.net/";
 const PYPI = ["https://pypi.org/", "https://files.pythonhosted.org/"];
 const RUN_TIMEOUT = 600_000;
 
+/// The form's own run of the setup `fill` puts on it, in a context of its own
+/// whose requests to the data origin are answered by the fixture release
+/// serve.mjs serves at `base`, the release the Python tab reads. Answers the
+/// totals the form draws at every step, which are the solver's own `activity`,
+/// `decay_heat` and `contact_dose`.
+///
+/// Its own context, so its requests to the data origin stay out of the Python
+/// tab's count of what was asked of other origins.
+async function formRun(browser, base, fill) {
+  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+  // Path for path: serve.mjs answers the release's latest.json, manifest and
+  // files under /fixtures/, Range and all. Playwright adds the CORS headers a
+  // fulfilled cross-origin response needs.
+  await context.route(`${ORIGIN}/**`, async (route) => {
+    const { pathname } = new URL(route.request().url());
+    await route.fulfill({ response: await route.fetch({ url: `${base}fixtures${pathname}` }) });
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(base);
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 60000 });
+    await fill(page);
+    await page.click("#run");
+    // run() disables Run before its first await and enables it when it is
+    // done: "Done in ..." then, or an empty status and the error in #warning.
+    await page.waitForFunction(() => !document.getElementById("run").disabled
+      && /^(Done|$)/.test(document.getElementById("status").textContent), null, { timeout: RUN_TIMEOUT });
+    if (!(await page.textContent("#status")).startsWith("Done")) throw new Error(await page.textContent("#warning"));
+    // Drawn in the same task that says Done, so settle before reading.
+    await page.waitForTimeout(400);
+    return await page.evaluate(() => {
+      const total = (id) => {
+        const el = document.getElementById(id);
+        const trace = el.data && el.data.find((t) => t.name === "total");
+        return trace ? trace.y.slice() : null;
+      };
+      return { activity: total("plot-activity"), decay_heat: total("plot-heat"), contact_dose: total("plot-dose") };
+    });
+  } finally {
+    await context.close();
+  }
+}
+
 /// The Python tab, served over http as GitHub Pages serves it, with the
 /// fixtures as a data release beside it (serve.mjs).
 ///
@@ -1677,8 +1780,10 @@ const RUN_TIMEOUT = 600_000;
 /// the first open of the tab is what does; the iron example's activity and
 /// decay heat, its plot, the batched download and its counter; a rerun that
 /// fetches nothing; the form's setup opened in the editor and run, with all
-/// of its figures drawn; tracebacks, Stop, and share links; and that nothing
-/// but Pyodide's CDN and PyPI is asked for from another origin.
+/// of its figures drawn, and the form's own run of that setup giving the same
+/// activity, decay heat and contact dose at every step; tracebacks, Stop, and
+/// share links; and that nothing but Pyodide's CDN and PyPI is asked for from
+/// another origin.
 async function checkPythonTab(browser) {
   const { WHEEL, YANI_CORE_VERSION } = await import("./dist/config.js");
   const fixtureRoots = [FIXTURES, FETCHED_FIXTURES];
@@ -1808,15 +1913,18 @@ async function checkPythonTab(browser) {
       // -- The form's setup, in the editor ----------------------------------
       // Iron on the form, opened in the Python tab: the script the download
       // writes, drawing its figures in the page instead of writing files.
+      const ironOnForm = async (p) => {
+        await p.click('[data-tab="custom"]');
+        await p.fill('#composition input[data-k="name"]', "Fe56");
+        await p.fill("#density", "7.874");
+        await p.fill("#volume", "1000");
+        await p.waitForFunction(() => {
+          const el = document.getElementById("plot-material");
+          return el.data && el.data[0].y.length === 1 && el.data[0].y[0] === "Fe56";
+        }, null, { timeout: 10000 });
+      };
       await page.click('.modes [data-mode="form"]');
-      await page.click('[data-tab="custom"]');
-      await page.fill('#composition input[data-k="name"]', "Fe56");
-      await page.fill("#density", "7.874");
-      await page.fill("#volume", "1000");
-      await page.waitForFunction(() => {
-        const el = document.getElementById("plot-material");
-        return el.data && el.data[0].y.length === 1 && el.data[0].y[0] === "Fe56";
-      }, null, { timeout: 10000 });
+      await ironOnForm(page);
       page.once("dialog", (d) => d.accept());
       await page.click("#open-python");
       await page.waitForFunction(() => window.yaniScript.code().includes('"Fe56": 1'), null, { timeout: 10000 });
@@ -1832,14 +1940,52 @@ async function checkPythonTab(browser) {
       if (!manifest.files.some((f) => f.path.startsWith("transmutation/branching.arrow/"))) {
         script = script.replace('yani.transmutation_branch_ratios = "endf-b8.1"', "yani.transmutation_branch_ratios = None");
       }
-      script += "\nprint(f\"peak activity {max(sum(a.values()) for a in activity)!r} Bq\")\n";
+      // Every step's totals, at full precision, for the form to be held to.
+      script += "\nfor i, m in enumerate(steps):\n"
+        + "    print(f\"step {i} {m.activity()!r} {m.decay_heat()!r} {m.contact_dose()!r}\")\n";
       out = await runCode(script);
       eq(/^Finished/.test(await status()), true, `the form's script runs (${await status()})`);
-      const peak = Number((out.match(/^peak activity (\S+) Bq$/m) || [])[1]);
+      const scriptSteps = [...out.matchAll(/^step \d+ (\S+) (\S+) (\S+)$/gm)].map((m) => m.slice(1).map(Number));
+      const peak = Math.max(0, ...scriptSteps.map(([activity]) => activity));
       eq(peak > 0, true, `peak activity ${peak.toExponential(4)} Bq`);
       const captions = await app(() => [...document.querySelectorAll("#py-plots figcaption span")].map((el) => el.textContent));
       eq(captions.join("|"), "Activity|Decay heat|Contact dose rate, at the surface|Inventory at the final step|Decay photon lines, final step",
         "and draws the form's five figures, through figure.show()");
+
+      // -- The same numbers as the form --------------------------------------
+      // The form's own run of the same setup, on the same release. Its totals
+      // come from the vendored yani-wasm and the script's from the yani-core
+      // wheel: two builds of the same solver, pinned apart (vendor/CORE_COMMIT
+      // and vendor/YANI_CORE_VERSION). On the published release they agree to
+      // the last bit or two, so anything past 1e-12 is a disagreement, not
+      // rounding.
+      let form = null;
+      try {
+        form = await formRun(browser, base, ironOnForm);
+      } catch (e) {
+        fail(`the form's own run of the setup: ${e.message || e}`);
+      }
+      if (form) {
+        eq(form.activity ? form.activity.length : 0, scriptSteps.length, "the form's run has the script's steps");
+        let compared = 0;
+        let worst = 0;
+        for (const [k, key] of ["activity", "decay_heat", "contact_dose"].entries()) {
+          (form[key] || []).forEach((value, i) => {
+            // A value the chart floors off its log axis is drawn as null.
+            if (value == null || !scriptSteps[i]) return;
+            const want = scriptSteps[i][k];
+            const scale = Math.max(Math.abs(value), Math.abs(want));
+            worst = Math.max(worst, scale ? Math.abs(value - want) / scale : 0);
+            compared++;
+          });
+        }
+        if (scriptSteps.length && compared === 3 * scriptSteps.length && worst <= 1e-12) {
+          ok(`the form gives the script's numbers: activity, decay heat and contact dose at ${scriptSteps.length} steps, ` +
+            `at most ${worst.toExponential(1)} apart`);
+        } else {
+          fail(`the form and its script: ${compared} of ${3 * scriptSteps.length} step totals compared, up to ${worst.toExponential(2)} apart`);
+        }
+      }
 
       // -- A figure partway down is drawn where it stands ------------------
       // A plotly method answering the figure it was called on is building
@@ -1888,7 +2034,8 @@ async function checkPythonTab(browser) {
 
     // -- Live origin ------------------------------------------------------------
     // The iron example against the published release, which the native wheel
-    // answers with these rows (yani-core 0.21.0, release 2026-10-10.1).
+    // answers with these rows (yani-core 0.21.0 on release 2026-10-10.1, and
+    // 0.21.3 on 2026-10-12.1).
     if (process.argv.includes("--live")) {
       const live = await context.newPage();
       await live.goto(base);
