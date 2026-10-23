@@ -665,9 +665,11 @@ Firefox and WebKit last ran the page end to end on the solver vendored before
 yani-core-0.11.0, where all three engines agreed to the last digit; only
 Chromium is installed here, so that is what this release was checked against.
 
-`node verify.mjs` is that check; it needs a local copy of the data
-(`YANI_FIXTURES`, or core's `fetch_test_fixtures.py`) and skips the run without
-one, so CI currently gates on everything up to the first solve.
+`node verify.mjs` is that check; it needs core's fixtures (`YANI_FIXTURES`, or
+core's `fetch_test_fixtures.py`) and skips the form's own run without them. CI
+has only what `scripts/fetch-fixtures.mjs` downloads, so there the form solves
+once, in the Python tab's checks, where its numbers are held to the script's
+(see "Checking it" under the Python tab).
 
 ## Session export
 
@@ -760,9 +762,9 @@ Emscripten's in-memory filesystem, so reruns fetch nothing. The downloader's
 `Downloaded 4 of 9 nuclides` lines collapse into one, and show in the status
 bar.
 
-The form's own fetches are untouched by this, and still read the unversioned
-layout (`<keyword>/neutron/...`); moving them to the release layout is separate
-work.
+The form reads the same release layout with its own fetch (`src/ranges.js` and
+`app.js`, fusion-neutronics/yani-online#40), so the form and the tab read the
+same files of the same release.
 
 **Plots.** `show(obj)` draws a plotly figure (with plotly.js inlined from the
 plotly package, so the frame needs no network and Save .html opens anywhere), a
@@ -801,43 +803,43 @@ node serve.mjs                         # http://localhost:8000/, ?data=/fixtures
 the form starts without loading any of the tab and that the first open does;
 the iron example's activity and decay heat at every step, its plotly figure,
 the batched download and its counter, and that a rerun fetches nothing; the
-form's setup opened in the editor and run, drawing its five figures; a figure
-line partway down a script; completion of yani's names; tracebacks, Stop and
-share links; and that nothing but Pyodide's CDN and PyPI is fetched from
-another origin. `--live` also runs the iron example against the published
-release and compares it with the native wheel's rows. With
-`YANI_FIXTURES=.fixtures` the form's own transmutation is skipped, as it is in
-CI, since it needs core's fixtures in core's layout.
+form's setup opened in the editor and run, drawing its five figures; the
+form's own run of that setup, in a page whose data-origin requests are
+answered from the same served release, giving the script's activity, decay
+heat and contact dose at every step, to 1e-12; a figure line partway down a
+script; completion of yani's names; tracebacks, Stop and share links; and that
+nothing but Pyodide's CDN and PyPI is fetched from another origin. `--live`
+also runs the iron example against the published release and compares it with
+the native wheel's rows, and checks the byte ranges of the release that
+`latest.json` names. With `YANI_FIXTURES=.fixtures` the form's own
+transmutation checks are skipped, as they are in CI, since they need core's
+fixtures in core's layout; the comparison with the script still runs.
 
-Measured here (yani-core 0.21.0 built from core main, Pyodide 314.0.7,
-Chromium): the first open of the tab is 6 to 13 s, nearly all of it Pyodide and
-the wheel coming over the network. The iron example on the fixtures is 10 s
-including plotly's install. Against the published release (2026-10-10.1) it
-fetched **196.6 MB in 92 requests in 210 s** and printed the same rows as the
-native wheel (`pip install` of the same core: 5.9805e+14 Bq and 144.60 W at
-shutdown, Mn56; 1.9255e+13 Bq and 0.018027 W ten years on, Fe55); the native
-run's cache holds about the same, 197 MB. Iron's closure reaches 20 nuclides
-with published cross sections.
+Measured here on 2026-10-23 (yani-core 0.21.3 from PyPI, Pyodide 314.0.7,
+Chromium): the first open of the tab starts Python in 2.1 to 2.6 s. The iron
+example on the fixtures is 5.6 s, including plotly's install. Against the
+published release (2026-10-12.1) it fetched **49.1 MB in 92 requests in 7 to
+11 s**, on the deployed page as on a local copy, and printed the same values as
+a native `pip install` of yani-core 0.21.3, to the last bit at every step
+(5.9805e+14 Bq and 144.60 W at shutdown, Mn56; 1.9255e+13 Bq and 0.018027 W ten
+years on, Fe55). Iron's closure reaches 20 nuclides with published cross
+sections.
 
-That download is whole files. The wheel reads byte ranges only where every
-index entry it needs carries a sha256 to check the bytes against, and release
-2026-10-10.1's `version.json`s carry the indexes without the hashes, so Fe56's
-39 MB `reactions.arrow` comes whole where its 294 K activation channels are a
-small part of it. Against the fixtures, which `serve.mjs` gives the hashes, the
-same example fetches 21.7 MB. A release republished with the hashes brings the
-live figure down the same way, with no change here.
+The wheel reads byte ranges only where every index entry it needs carries a
+sha256 to check the bytes against. Release 2026-10-10.1's `version.json`s
+carried the indexes without the hashes, so against it the same example fetched
+whole files, 196.6 MB in 210 s, with Fe56's 39 MB `reactions.arrow` among them.
+2026-10-12.1 carries the hashes. Against the fixtures, which `serve.mjs` gives
+the hashes, the example fetches 21.7 MB.
 
-Same numbers as the form: on core's fixtures, the form (with a yani-wasm built
-from the same core) and the form's script run in the Python tab give the same
-peak activity for the Fe56 check to a part in 1e15: 218914056970099.3 Bq in
-the form, 218914056970099.28 in the script. The form's vendored solver (yani-core 0.18.0) cannot run that check
-today: it refuses the decay data now published, and core's fixtures, with
-"decay/nuclides.arrow has columns the schema does not declare". That is the
-vendored wasm being older than the data, and wants a re-vendor from a current
-core release.
-
-Not yet done:
-
-- the form's fetches still read the unversioned layout; moving them to the
-  release layout is separate
-- the vendored form solver predates the decay data now published (above)
+**Same numbers as the form.** `verify.mjs` holds the form to the script on every
+run, CI's included (above). Against the published release 2026-10-12.1, with
+the page served from `localhost` and yani-core 0.21.3 on both sides, the form's
+Fe56 setup (the default HCPB spectrum and schedule, 294 K) and its script in
+the Python tab gave the same activity, decay heat and contact dose at all 11
+steps, identical or within two units in the last place (218953519632458.25 Bq,
+50.06054473676788 W and 7554.745102195669 Gy/h at shutdown in both), and a
+native yani-core 0.21.3 run of the same script printed the script's values bit
+for bit. The form's live run of that setup makes 5582 requests, and on
+2026-10-23 the origin answered 429 after about a thousand of them in five
+seconds, so it was run with 700 ms of latency added to each request.

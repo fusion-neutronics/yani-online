@@ -59,8 +59,9 @@ jobs:
         # installed from PyPI, against the published data
         # scripts/fetch-fixtures.mjs lists (Fe56, lithium and the
         # transmutation chain), fetched once up front and served locally. The
-        # form's own transmutation needs core's fixtures, in core's layout, and
-        # is skipped here as before.
+        # form's own checks need core's fixtures, in core's layout, and are
+        # skipped here as before, but the Python tab's checks run the form once
+        # on Fe56 against the same fetched release, to hold it to its script.
         run: |
           ls -la dist/
           npm ci
