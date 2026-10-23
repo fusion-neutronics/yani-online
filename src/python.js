@@ -196,7 +196,7 @@ schedule = yani.PulseSchedule([
 # stepped and whose index 0 is the composition before the first step. The page
 # plots the end of each step, which is what step_materials is.
 results = material.transmute(schedule=schedule)
-steps = results.step_materials(material.id or 0)
+steps = results.step_materials(material.id)
 
 SECONDS = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0, "a": 365.25 * 86400.0}
 # Time after shutdown, in years, to match the page's axis: a decay curve is
