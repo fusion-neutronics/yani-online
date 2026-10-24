@@ -375,6 +375,14 @@
                data, and a list kept here would drift from it. -->
           <select id="spectrum-preset"></select>
         </label>
+        <!-- The preset's magnitude and its uncertainty, offered rather than
+             applied: choosing a preset changes the shape and nothing else.
+             Then what the preset is, from its description. -->
+        <div class="status" id="preset-flux"></div>
+        <div class="inline" style="margin-top:.4rem">
+          <button class="secondary" id="use-preset-flux">Use this flux for every pulse</button>
+        </div>
+        <p class="note" id="preset-description"></p>
       </div>
 
       <div data-panel="groups" hidden>
@@ -408,7 +416,10 @@
 
       <p class="note">
         The shape is normalised, so the magnitude comes from each pulse's flux
-        below.
+        below. The tokamak presets are a typical EU DEMO with four blankets,
+        modelled in yamc; every one, with its statistical errors, is also on
+        the other nine group structures in
+        <a href="https://github.com/fusion-neutronics/yani-online/tree/main/spectra/data">spectra/data</a>.
       </p>
     </section>
 
@@ -538,10 +549,17 @@
         <button class="secondary" id="add-pulse">Add pulse</button>
         <button class="secondary" id="add-cooldown">Add cooldown</button>
       </div>
+      <!-- Scenarios replace the table; their labels come from src/schedules.js. -->
+      <div class="inline" style="margin-top:.5rem">
+        <button class="secondary" id="scenario-one-year" data-scenario="one-year"></button>
+        <button class="secondary" id="scenario-five-years" data-scenario="five-years-80"></button>
+      </div>
       <p class="note">
         A cooldown's duration is the length of <em>that step</em>, not a
         cumulative time, so log-spaced sampling means differencing the times you
-        want.
+        want. A scenario's pulses run at the selected preset's full-power flux,
+        or else at the first pulse's. Five years at 80% availability is five
+        0.8 a pulses with 0.2 a breaks, then cooling to 100 a.
       </p>
     </section>
   </div>
