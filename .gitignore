@@ -8,6 +8,9 @@ dist/
 
 node_modules/
 
+# Python bytecode from running spectra/make_spectra.py.
+__pycache__/
+
 # Screenshots from the verification pass.
 *.png
 # The file verify.mjs exports and reopens, a few MB of page and results.
