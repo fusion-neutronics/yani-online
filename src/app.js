@@ -38,8 +38,9 @@ const LIBRARIES = {
 
 // ENDF/B-8.1 by default for every subsection. Three libraries publish a
 // complete, self-consistent network (it, jeff-4.0 and jendl-5.0), and this one
-// is the default because it is what the rest of the stack defaults to, so a
-// calculation set up here matches one set up in yamc without being told to.
+// is the default because it is the one the docs and examples use. The wheels
+// themselves have no default for the transmutation subsections, so the Python
+// this page generates sets every one explicitly.
 //
 // TENDL covers far more parent nuclides for `reactions` and is the better
 // choice when it is available, but making it the default would silently require
