@@ -17,6 +17,23 @@ temperature the material is at, in byte ranges out of the published files rather
 than the files themselves, which is about thirty times less to download for the
 same answer.
 
+## Spectra and schedules
+
+The **Preset** tab offers the neutron flux at five places in a typical EU DEMO
+(the 2015 baseline, 2037 MW of fusion power) with each of four breeding
+blankets, HCPB, HCLL, WCLL and WCCB: the first wall, the breeder zone, the
+vacuum vessel, the inboard leg of the TF coil winding pack and the face of the
+bioshield. They come from a Monte Carlo model in yamc that
+[spectra/make_spectra.py](spectra/make_spectra.py) rebuilds, which lists the
+papers its layers and compositions come from. Each is a shape with its
+full-power flux and that flux's uncertainty beside it, and a description of
+what it is, and what the model leaves out there, below it: **Use this flux for
+every pulse** puts that magnitude in the schedule, and **One year, then
+cooling** and **Five years at 80% availability, then cooling** replace the
+schedule with a whole irradiation at it. The same spectra, with their
+statistical errors, are in [spectra/data](spectra/data) on all ten group
+structures.
+
 ## Python in the browser
 
 The **Python** tab beside the form is an editor that runs `yani` scripts in
