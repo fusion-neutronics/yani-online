@@ -20,6 +20,21 @@ const num = (v) => {
 };
 const str = (s) => JSON.stringify(String(s));
 
+/// A sentence as Python comment lines, wrapped at a readable width.
+function commentLines(text, width = 79) {
+  const lines = [];
+  let line = "#";
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    if (line.length + 1 + word.length > width && line !== "#") {
+      lines.push(line);
+      line = "#";
+    }
+    line += ` ${word}`;
+  }
+  if (line !== "#") lines.push(line);
+  return lines;
+}
+
 /// A list, wrapped at a readable width. A 709-group flux is one of these, and
 /// on one line it would be a kilometre wide.
 function list(values, indent = 4) {
@@ -78,10 +93,22 @@ function materialSource(material, temperature) {
 /// would bury the rest of the script.
 function spectrumSource(spectrum) {
   if (spectrum.structure) {
+    // A tokamak preset's magnitude goes in as a comment, with its uncertainty
+    // and, for one short of its statistics gate, why: the shape is what the
+    // source takes, and the rate is each pulse's, which may or may not be it.
+    const magnitude = Number.isFinite(spectrum.flux)
+      ? [
+        `# Its total flux at the model's full power is ${num(spectrum.flux)} n/cm2/s`
+          + `${Number.isFinite(spectrum.fluxRelErr) ? ` +/- ${Number((100 * spectrum.fluxRelErr).toPrecision(2))}%` : ""}`
+          + ` (${num(spectrum.fusionPowerMW)} MW fusion).`,
+        ...(spectrum.shortOfGate ? commentLines(spectrum.shortOfGate) : []),
+      ]
+      : [];
     return [
       spectrum.label
         ? `# ${spectrum.label}, one of the page's presets, on ${spectrum.structure}, resolved by name inside yani.`
         : `# ${spectrum.structure}, resolved by name inside yani.`,
+      ...magnitude,
       `flux = ${list(spectrum.values)}`,
       `spectrum = yani.NeutronSource(`,
       `    energy=yani.sources.Histogram(${str(spectrum.structure)}, flux)`,

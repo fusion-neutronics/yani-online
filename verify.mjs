@@ -23,7 +23,7 @@
 
 import { chromium } from "playwright";
 import { readFile, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 
 import {
   COALESCE_GAP, assembleNuclideData, energyRanges, kelvin, nearestTemperature, planEnergyFetch,
@@ -31,7 +31,9 @@ import {
   checkFile, checkParts, latestUrl, parseLatest, parseManifest, sha256Hex, SUPPORTED_FORMAT_VERSIONS,
   wantedParts,
 } from "./src/ranges.js";
-import { SPECTRA } from "./src/spectra.js";
+import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
+import { SOURCE, SPECTRA } from "./src/spectra.js";
+import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
 import { serve, FETCHED_FIXTURES } from "./serve.mjs";
 
 // Core's downloaded test fixtures. Override with YANI_FIXTURES; the default is
@@ -388,53 +390,221 @@ function checkRanges() {
   eq(single.energy, null, "and so is one covering the whole grid file");
 }
 
-/// Check the spectrum presets, without a browser.
+/// The presets' layout: five places in each of four blankets, then the two
+/// emissions, and the group count of every structure spectra/data carries.
+const BLANKETS = ["hcpb", "hcll", "wcll", "wccb"];
+const PLACES = ["fw", "bz", "vv", "tf", "bio"];
+const TOKAMAK = BLANKETS.flatMap((b) => PLACES.map((p) => `${b}-${p}`));
+const EMISSIONS = ["dt-plasma", "dd-plasma"];
+const DATA_STRUCTURES = {
+  "XMAS-172": 172, "VITAMIN-J-175": 175, "SCALE-252": 252, "TRIPOLI-315": 315, "SHEM-361": 361,
+  "LLNL-616": 616, "CCFE-709": 709, "SCALE-999": 999, "UKAEA-1102": 1102, "ECCO-1968": 1968,
+};
+
+/// One of spectra/data's files: its comment lines, its column names, and its
+/// rows as numbers.
+function readSpectraCsv(structure) {
+  const lines = readFileSync(`spectra/data/${structure}.csv`, "utf8").split("\n").filter(Boolean);
+  const [head, ...rows] = lines.filter((l) => !l.startsWith("#"));
+  return {
+    comments: lines.filter((l) => l.startsWith("#")),
+    columns: head.split(","),
+    rows: rows.map((r) => r.split(",").map(Number)),
+  };
+}
+
+/// Check the spectrum presets and the data files, without a browser.
 ///
 /// They are generated data (spectra/make_spectra.py), so what can go wrong is
 /// what goes wrong with data: a file half-written, a preset copied over another,
-/// a shape that is not one. The physics of each is the generator's business and
-/// is not re-derived here; what is checked is that the seven are seven, that each
-/// is a shape on the same structure, and that the two emissions and the five
-/// first-wall spectra sit where they should relative to each other.
+/// a shape that is not one, a magnitude in the wrong place. The physics is the
+/// generator's business and is not re-derived here; what is checked is that
+/// the 22 are 22, each a shape on one structure, that the magnitudes fall the
+/// way a shield makes them fall, that each place's spectrum has the character
+/// it should (a hard first wall, a thermalised bioshield), and that the data
+/// files agree with what the page carries.
 function checkSpectra() {
   const keys = Object.keys(SPECTRA);
-  eq(keys.length, 7, "seven spectrum presets");
+  eq(keys.join(","), [...TOKAMAK, ...EMISSIONS].join(","),
+    "22 spectrum presets: five places in each of four blankets, then the two emissions");
   eq([...new Set(keys.map((k) => SPECTRA[k].structure))].join(","), "CCFE-709", "all on one structure");
   eq([...new Set(keys.map((k) => SPECTRA[k].values.length))].join(","), "709", "one value per group");
   let shapes = 0;
   for (const key of keys) {
-    const { values, label, description } = SPECTRA[key];
+    const { values, label, description, group } = SPECTRA[key];
     const sum = values.reduce((n, v) => n + v, 0);
     if (Math.abs(sum - 1) > 1e-3) fail(`${key} sums to ${sum}, not one`);
     else if (values.some((v) => !(v >= 0))) fail(`${key} has a negative or missing value`);
-    else if (!label || !description) fail(`${key} has no label or description`);
+    else if (!label || !description || !group) fail(`${key} has no label, description or group`);
     else shapes++;
   }
-  eq(shapes, keys.length, "every preset is a non-negative shape summing to one, labelled");
+  eq(shapes, keys.length, "every preset is a non-negative shape summing to one, labelled and grouped");
+  eq(new Set(keys.map((k) => SPECTRA[k].label)).size, keys.length, "with distinct labels");
 
-  // A copy of one spectrum under five names passes everything above.
+  // A copy of one spectrum under two names passes everything above.
   const fingerprint = (k) => SPECTRA[k].values.map((v) => v.toExponential(3)).join();
   eq(new Set(keys.map(fingerprint)).size, keys.length, "no two presets are the same spectrum");
 
-  // Where the mass sits. The groups ascend in energy, so the D-T emission peaks
-  // in a higher group than the D-D one, and both are narrow: a Gaussian a few
-  // hundred keV wide covers a handful of the 709 groups. A first-wall spectrum
-  // is the same source after a blanket has scattered it, so it is spread over
-  // hundreds of groups, and it still carries the uncollided source: the group
-  // the D-T emission peaks in holds a good percent of every one of them. Not
-  // its peak group, though. In the lithium-lead blankets the flux the breeder
-  // reflects, multiplied by (n,2n) on lead and slowed by inelastic scattering,
-  // outweighs the source at a few hundred keV, which is a finding rather than
-  // a fault.
+  // The magnitudes. The tokamak presets carry their total at full power; the
+  // emissions are shapes and carry none. The source is the fusion power over
+  // the energy of a D-T reaction.
+  eq(TOKAMAK.filter((k) => Number.isFinite(SPECTRA[k].flux) && SPECTRA[k].flux > 0).length, TOKAMAK.length,
+    "every tokamak preset has a finite positive full-power flux");
+  eq(EMISSIONS.every((k) => SPECTRA[k].flux === null), true, "and the emissions have none");
+  // How well each magnitude is known, and whether the page can say so: every
+  // tokamak preset carries a relative uncertainty, its description quotes it,
+  // and one short of its statistics gate says why, in `shortOfGate` and in the
+  // description both.
+  let quoted = 0;
+  for (const key of TOKAMAK) {
+    const { fluxRelErr, shortOfGate, description } = SPECTRA[key];
+    const percent = `+/- ${Number((100 * fluxRelErr).toPrecision(2))}%`;
+    if (!(fluxRelErr > 0 && fluxRelErr < 1)) fail(`${key}: fluxRelErr is ${fluxRelErr}`);
+    else if (!description.includes(percent)) fail(`${key}: the description does not quote ${percent}`);
+    else if (shortOfGate !== null && !(typeof shortOfGate === "string" && description.includes(shortOfGate))) fail(`${key}: shortOfGate is ${shortOfGate}`);
+    else if (shortOfGate === null && /Short of its statistics gate/.test(description)) fail(`${key}: short of its gate in its description but not flagged`);
+    else quoted++;
+  }
+  eq(quoted, TOKAMAK.length, "every tokamak preset has an uncertainty its description quotes, and says when it is short of its gate");
+  eq(EMISSIONS.every((k) => SPECTRA[k].fluxRelErr === null && SPECTRA[k].shortOfGate === null), true,
+    "and the emissions have neither");
+  const rate = SOURCE.fusionPowerMW * 1e6 / (17.589e6 * 1.602176634e-19);
+  eq(Math.abs(SOURCE.neutronsPerSecond / rate - 1) < 1e-3, true,
+    `the source: ${SOURCE.neutronsPerSecond.toExponential(3)} n/s at ${SOURCE.fusionPowerMW} MW`);
+  // A shield is what makes the flux fall: first wall, breeder zone, vessel in
+  // that order, and both the coil and the bioshield behind the vessel. The coil
+  // and the bioshield are not ordered against each other: the bioshield is
+  // reached through the outboard side, which has no coil in the way.
+  for (const blanket of BLANKETS) {
+    const f = (p) => SPECTRA[`${blanket}-${p}`].flux;
+    eq(f("fw") > f("bz") && f("bz") > f("vv") && f("vv") > f("tf") && f("vv") > f("bio"), true,
+      `${blanket}: fw > bz > vv, and vv above tf and bio (${PLACES.map((p) => f(p).toExponential(1)).join(", ")})`);
+    eq(f("fw") > 1e14 && f("fw") < 2e15, true, `${blanket}: a first-wall flux a DEMO has (${f("fw").toExponential(2)} n/cm2/s)`);
+  }
+
+  // Where the mass sits, by energy, read off the data file's boundaries. A
+  // first wall sees mostly fast neutrons and almost no thermal ones; a concrete
+  // wall twenty metres out sees a thermalised spectrum.
+  const page = readSpectraCsv("CCFE-709");
+  const lower = page.rows.map((r) => r[1]);
+  const upper = page.rows.map((r) => r[2]);
+  const share = (key, keep) => SPECTRA[key].values.reduce((n, v, g) => n + (keep(g) ? v : 0), 0);
+  const thermal = (key) => share(key, (g) => upper[g] <= 0.625);
+  const fast = (key) => share(key, (g) => lower[g] >= 1e5);
+  for (const blanket of BLANKETS) {
+    eq(fast(`${blanket}-fw`) > 0.5 && thermal(`${blanket}-fw`) < 0.05, true,
+      `${blanket}: the first wall is hard (${(100 * fast(`${blanket}-fw`)).toFixed(0)}% above 0.1 MeV, ` +
+      `${(100 * thermal(`${blanket}-fw`)).toFixed(1)}% thermal)`);
+    eq(thermal(`${blanket}-bio`) > 0.3, true,
+      `${blanket}: the bioshield is thermalised (${(100 * thermal(`${blanket}-bio`)).toFixed(0)}% under 0.625 eV)`);
+  }
+
+  // The groups ascend in energy, so the D-T emission peaks in a higher group
+  // than the D-D one, and both are narrow: a Gaussian a few hundred keV wide
+  // covers a handful of the 709 groups. A first wall's spectrum is the same
+  // source after the blanket behind it has scattered it back, so it is spread
+  // over hundreds of groups and still carries the uncollided source: the group
+  // the D-T emission peaks in holds a good percent of it. A breeder zone's is
+  // spread across the structure too.
   const argmax = (k) => SPECTRA[k].values.indexOf(Math.max(...SPECTRA[k].values));
   const populated = (k) => SPECTRA[k].values.filter((v) => v > 1e-6).length;
   const sourceGroup = argmax("dt-plasma");
   eq(sourceGroup > argmax("dd-plasma"), true, "the D-T emission peaks above the D-D one");
   eq(populated("dt-plasma") < 40 && populated("dd-plasma") < 40, true, "the emissions are narrow");
-  for (const key of keys.filter((k) => k.startsWith("fw-"))) {
-    eq(populated(key) > 250, true, `${key} is spread across the structure`);
-    eq(SPECTRA[key].values[sourceGroup] > 0.01, true, `${key} carries the uncollided source`);
+  for (const blanket of BLANKETS) {
+    eq(populated(`${blanket}-fw`) > 250 && populated(`${blanket}-bz`) > 250, true,
+      `${blanket}: the first wall and the breeder zone are spread across the structure`);
+    eq(SPECTRA[`${blanket}-fw`].values[sourceGroup] > 0.01, true, `${blanket}: the first wall carries the uncollided source`);
   }
+
+  // The data files. Each is the same runs on its own structure, so the page's
+  // file and the page's presets have to agree: normalised, every CCFE-709
+  // column is the preset, to the four figures both are written to and then
+  // some.
+  let agree = 0;
+  for (const key of TOKAMAK) {
+    const column = page.columns.indexOf(key);
+    if (column < 0 || page.columns[column + 1] !== `${key}_rel_err`) {
+      fail(`spectra/data/CCFE-709.csv has no ${key} and ${key}_rel_err columns`);
+      continue;
+    }
+    const values = page.rows.map((r) => r[column]);
+    const total = values.reduce((n, v) => n + v, 0);
+    const preset = SPECTRA[key].values;
+    const off = values.findIndex((v, g) => {
+      const a = v / total;
+      const b = preset[g];
+      return a === 0 || b === 0 ? a !== b : Math.abs(a / b - 1) > 5e-4;
+    });
+    if (off >= 0) fail(`${key}: spectra/data/CCFE-709.csv's group ${off + 1} is ${values[off] / total} normalised, the preset ${preset[off]}`);
+    else if (Math.abs(total / SPECTRA[key].flux - 1) > 5e-4) fail(`${key}: the file's total ${total} against the preset's ${SPECTRA[key].flux}`);
+    else agree++;
+  }
+  eq(agree, TOKAMAK.length, "spectra/data/CCFE-709.csv, normalised, is every tokamak preset to four figures, and its total the flux");
+  const wanted = [...TOKAMAK.flatMap((k) => [k, `${k}_rel_err`]), ...EMISSIONS];
+  let files = 0;
+  for (const [structure, groups] of Object.entries(DATA_STRUCTURES)) {
+    const file = readSpectraCsv(structure);
+    const contiguous = file.rows.every((r, g) => r[0] === g + 1 && r[1] < r[2] && (g === 0 || r[1] === file.rows[g - 1][2]));
+    const emissions = EMISSIONS.every((k) => {
+      const column = file.columns.indexOf(k);
+      return Math.abs(file.rows.reduce((n, r) => n + r[column], 0) - 1) < 1e-3;
+    });
+    const provenance = file.comments.some((l) => /yamc-core \d+\.\d+\.\d+/.test(l) && /release/.test(l));
+    if (file.rows.length !== groups) fail(`spectra/data/${structure}.csv has ${file.rows.length} rows for ${groups} groups`);
+    else if (file.columns.slice(3).join(",") !== wanted.join(",")) fail(`spectra/data/${structure}.csv's columns are ${file.columns.join(",")}`);
+    else if (!contiguous) fail(`spectra/data/${structure}.csv's groups are not numbered, ascending and contiguous`);
+    else if (!emissions) fail(`spectra/data/${structure}.csv's emissions do not sum to one`);
+    else if (!provenance) fail(`spectra/data/${structure}.csv does not say which yamc-core and data release made it`);
+    else files++;
+  }
+  eq(files, Object.keys(DATA_STRUCTURES).length, "spectra/data has every structure, a row per group, every preset with its error, and its provenance");
+}
+
+/// Check the schedules the page builds and the scenario buttons write, without
+/// a browser, with durations converted by the vendored solver's own
+/// `durationToSeconds`, which is what a run uses.
+function checkSchedules() {
+  initSync({ module: readFileSync("vendor/yani_wasm_bg.wasm") });
+  const seconds = (step) => durationToSeconds(step.value, step.unit);
+  const year = durationToSeconds(1, "a");
+  eq(Math.abs(year / UNIT_SECONDS.a - 1) < 1e-12, true, "the page's year is the solver's");
+  eq(Object.keys(SCENARIOS).join(","), "one-year,five-years-80", "two scenarios");
+
+  const one = scenarioSchedule("one-year", 1e14);
+  eq(JSON.stringify(one[0]), JSON.stringify({ kind: "pulse", rate: 1e14, value: 1, unit: "a" }),
+    "one year: a pulse of a year at the rate given");
+  eq(one.slice(1).filter((s) => s.kind === "cooldown").length, 10, "then ten cooling steps");
+
+  const rate = 3.74e14;
+  const five = scenarioSchedule("five-years-80", rate);
+  const last = five.findLastIndex((s) => s.kind === "pulse");
+  const pulses = five.filter((s) => s.kind === "pulse");
+  const breaks = five.slice(0, last).filter((s) => s.kind === "cooldown");
+  const cooling = five.slice(last + 1);
+  eq(pulses.length === 5 && pulses.every((s) => s.rate === rate && s.value === 0.8 && s.unit === "a"), true,
+    "five years at 80%: five pulses of 0.8 a at the rate given");
+  eq(breaks.length === 4 && breaks.every((s) => s.value === 0.2 && s.unit === "a") && five[0].kind === "pulse", true,
+    "with four breaks of 0.2 a between them");
+  eq(cooling.length === 12 && cooling.every((s) => s.kind === "cooldown"), true, "then twelve cooling steps");
+  eq(five.length, 21, "21 rows in all");
+  const fullPower = pulses.reduce((n, s) => n + seconds(s), 0) / year;
+  const shutdown = five.slice(0, last + 1).reduce((n, s) => n + seconds(s), 0) / year;
+  if (Math.abs(fullPower - 4) < 1e-9 && Math.abs(shutdown - 4.8) < 1e-9) {
+    ok(`by the solver's durations, ${fullPower.toFixed(1)} full-power years, shut down at ${shutdown.toFixed(1)} a`);
+  } else {
+    fail(`the five-year scenario is ${fullPower} full-power years, shut down at ${shutdown} a`);
+  }
+  const cumulative = [];
+  for (const step of cooling) cumulative.push((cumulative.at(-1) || 0) + seconds(step));
+  const ratios = cumulative.slice(1).map((t, i) => t / cumulative[i]);
+  if (Math.abs(cumulative[0] - 1) < 1e-9 && Math.abs(cumulative.at(-1) / (100 * year) - 1) < 0.01
+      && ratios.every((r) => Math.abs(r / ratios[0] - 1) < 0.03)) {
+    ok(`and its cooling runs log-evenly from 1 s to 100 a (ratio ${ratios[0].toFixed(2)} per step)`);
+  } else {
+    fail(`the five-year cooling times are ${cumulative.map((t) => t.toExponential(2)).join(", ")} s`);
+  }
+  threw("an unknown scenario", () => scenarioSchedule("ten-years", 1e14));
 }
 
 /// Check what gets handed to the solver, out of what came back.
@@ -783,6 +953,7 @@ async function main() {
   await checkAssembly();
   await checkHashes();
   checkSpectra();
+  checkSchedules();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
     await checkLive(named.length ? named : ["Li6", "Al27"]);
@@ -1107,6 +1278,19 @@ async function main() {
   // more than their peak.
   const offered = await page.$$eval("#spectrum-preset option", (opts) => opts.map((o) => o.value));
   eq(offered.join(","), Object.keys(SPECTRA).join(","), "the dropdown offers every preset in order");
+  // Under one heading per blanket, in the file's order, then the emissions,
+  // each heading holding the presets that name it.
+  const headings = await page.$$eval("#spectrum-preset optgroup", (groups) =>
+    groups.map((g) => [g.label, [...g.querySelectorAll("option")].map((o) => o.value).join(",")]));
+  const wantHeadings = [];
+  for (const [key, preset] of Object.entries(SPECTRA)) {
+    if (!wantHeadings.length || wantHeadings.at(-1)[0] !== preset.group) wantHeadings.push([preset.group, []]);
+    wantHeadings.at(-1)[1].push(key);
+  }
+  eq(JSON.stringify(headings), JSON.stringify(wantHeadings.map(([g, keys]) => [g, keys.join(",")])),
+    `grouped under ${headings.map(([g]) => g).join(", ")}`);
+  eq(headings.map(([g]) => g).join("|"), "HCPB blanket|HCLL blanket|WCLL blanket|WCCB blanket|Plasma emission, unmoderated",
+    "one heading per blanket, then the emissions");
   const curve = () => page.$eval("#plot-spectrum", (el) => JSON.stringify(el.data[0].y.slice(0, 200)));
   const firstWall = await curve();
   await page.selectOption("#spectrum-preset", "dt-plasma");
@@ -1119,6 +1303,103 @@ async function main() {
     () => fail("the spectrum did not follow the preset"),
   );
   await page.selectOption("#spectrum-preset", offered[0]);
+
+  // The magnitude. The line under the dropdown gives a tokamak preset's total
+  // flux at full power and says an emission has none; the button that offers
+  // it to the pulses is live only when there is one to offer; and choosing a
+  // preset, which is choosing a shape, changes no rate by itself.
+  const asRate = (rate) => {
+    const [mantissa, exponent] = rate.toExponential(3).split("e");
+    return `${Number(mantissa)}e${Number(exponent)}`;
+  };
+  const asFlux = (rate) => {
+    const [mantissa, exponent] = rate.toExponential(2).split("e");
+    return `${Number(mantissa)}e${Number(exponent)}`;
+  };
+  const asPercent = (fraction) => `${Number((100 * fraction).toPrecision(2))}%`;
+  const fluxLine = (key) => `Full-power flux ${asFlux(SPECTRA[key].flux)} n/cm2/s +/- ${asPercent(SPECTRA[key].fluxRelErr)} `
+    + `at ${SOURCE.fusionPowerMW} MW fusion${SPECTRA[key].shortOfGate ? "; short of its statistics gate, see below" : ""}`;
+  const presetState = () => page.evaluate(() => ({
+    line: document.getElementById("preset-flux").textContent,
+    description: document.getElementById("preset-description").textContent,
+    disabled: document.getElementById("use-preset-flux").disabled,
+    rates: [...document.querySelectorAll('#schedule input[data-k="rate"]')].map((el) => el.value),
+    rows: [...document.querySelectorAll("#schedule tr")].map((tr) => [
+      tr.children[0].textContent.trim(),
+      tr.querySelector('input[data-k="rate"]')?.value ?? "",
+      tr.querySelector('input[data-k="value"]').value,
+      tr.querySelector('select[data-k="unit"]').value,
+    ].join(" ")),
+  }));
+  const defaultRows = (await presetState()).rows;
+  let shown = await presetState();
+  if (shown.line === fluxLine(offered[0]) && !shown.disabled) {
+    ok(`the preset's magnitude and its uncertainty are shown under it, and offered (${shown.line})`);
+  } else {
+    fail(`under ${offered[0]} the flux line reads "${shown.line}", the button ${shown.disabled ? "disabled" : "live"}`);
+  }
+  eq(shown.description, SPECTRA[offered[0]].description, "and what the preset is, from its description, under that");
+  await page.selectOption("#spectrum-preset", "wcll-tf");
+  shown = await presetState();
+  eq(shown.line === fluxLine("wcll-tf") && shown.description === SPECTRA["wcll-tf"].description, true,
+    `#preset-flux and the description follow the selection (${shown.line})`);
+  // A preset short of its gate says so where it is chosen, not only in the
+  // data: the flux line points at the description, which says why.
+  const shortKey = TOKAMAK.find((k) => SPECTRA[k].shortOfGate);
+  if (shortKey) {
+    await page.selectOption("#spectrum-preset", shortKey);
+    shown = await presetState();
+    eq(shown.line.endsWith("short of its statistics gate, see below") && shown.description.includes(SPECTRA[shortKey].shortOfGate), true,
+      `a preset short of its statistics gate says so on the page (${shortKey}: ${shown.line})`);
+  } else {
+    ok("no preset is short of its statistics gate, so none is marked");
+  }
+  await page.selectOption("#spectrum-preset", "dt-plasma");
+  shown = await presetState();
+  eq(/no magnitude/.test(shown.line) && shown.disabled, true, `an emission has no magnitude to offer (${shown.line})`);
+  eq(shown.rates.join(","), "1e14", "and choosing presets left the rate alone");
+  await page.selectOption("#spectrum-preset", "wcll-tf");
+  await page.click('#spectrum-panel [role="tab"][data-tab="groups"]');
+  eq(await page.$eval("#use-preset-flux", (el) => el.disabled), true, "the offer is withdrawn on the Group structure tab");
+  await page.click('#spectrum-panel [role="tab"][data-tab="preset"]');
+  await page.click("#add-pulse");
+  await page.click("#use-preset-flux");
+  shown = await presetState();
+  const tfRate = asRate(SPECTRA["wcll-tf"].flux);
+  eq(shown.rates.length === 2 && shown.rates.every((r) => r === tfRate), true,
+    `#use-preset-flux fills every pulse's rate (${shown.rates.join(", ")})`);
+
+  // The scenarios, which replace the table, at the preset's flux. Five years at
+  // 80% availability is five pulses with four breaks between them and twelve
+  // cooling steps after, and the Python export carries every row of it.
+  await page.click("#scenario-five-years");
+  shown = await presetState();
+  const fivePulses = shown.rows.filter((r) => r.startsWith("Pulse"));
+  eq(shown.rows.length, 21, "the five-year button gives 21 rows");
+  eq(fivePulses.length === 5 && fivePulses.every((r) => r === `Pulse ${tfRate} 0.8 a`), true,
+    `five pulses of 0.8 a at the preset's flux (${fivePulses[0]})`);
+  const [fiveDownload] = await Promise.all([page.waitForEvent("download"), page.click("#download-python")]);
+  const fiveScript = await new Promise((resolve, reject) => {
+    fiveDownload.createReadStream().then((stream) => {
+      let text = "";
+      stream.on("data", (chunk) => { text += chunk; });
+      stream.on("end", () => resolve(text));
+      stream.on("error", reject);
+    }, reject);
+  });
+  const fiveSteps = (fiveScript.match(/^ {4}\("(pulse|cooldown)"/gm) || []).length;
+  const magnitude = fiveScript.includes(`full power is ${SPECTRA["wcll-tf"].flux.toExponential()} n/cm2/s `
+    + `+/- ${asPercent(SPECTRA["wcll-tf"].fluxRelErr)} (${SOURCE.fusionPowerMW} MW fusion)`);
+  const gateComment = /^# Short of its statistics gate/m.test(fiveScript) === Boolean(SPECTRA["wcll-tf"].shortOfGate);
+  eq(fiveSteps === 21 && magnitude && gateComment, true,
+    `and the Python export carries its ${fiveSteps} rows and the preset's magnitude, uncertainty and caveat`);
+  // Back to the default, the way a user would get there: the one-year button,
+  // then the rate typed back in.
+  await page.click("#scenario-one-year");
+  await page.fill('#schedule input[data-k="rate"]', "1e14");
+  await page.selectOption("#spectrum-preset", offered[0]);
+  shown = await presetState();
+  eq(shown.rows.join("|"), defaultRows.join("|"), "the one-year button writes the default schedule back");
 
   if (haveFixtures) {
   // A single-nuclide material, so the fixture set covers the seed even though
@@ -1510,6 +1791,53 @@ async function main() {
 
   const volume = await page.$eval("#volume", (el) => el.value);
   const base = await solve();
+
+  // A scenario, solved: the five-year button at a tokamak preset, which has
+  // to come back with a point per row and the activity its flux makes. Then
+  // that session exported and reopened, here rather than only at the end,
+  // which the temperature probe below does not always reach, and early, while
+  // the page holds the least, since the export clones the page and the reopen
+  // loads a second copy: the preset, its flux line, the button and the 21 rows
+  // have to come back with the peak.
+  await page.selectOption("#spectrum-preset", "hcll-tf");
+  await page.click("#scenario-five-years");
+  const scenarioPeak = await solve();
+  const scenarioPoints = await page.$eval("#plot-activity", (el) => el.data[0].x.length);
+  eq(scenarioPoints === 21 && scenarioPeak > 0, true,
+    `the five-year scenario solves at hcll-tf: ${scenarioPoints} steps, peak ${scenarioPeak.toExponential(4)} Bq`);
+  const [scenarioDownload] = await Promise.all([page.waitForEvent("download"), page.click("#export")]);
+  const scenarioPath = `${process.cwd()}/verify-session.html`;
+  await scenarioDownload.saveAs(scenarioPath);
+  const scenarioPage = await browser.newPage({ viewport: { width: 1400, height: 1600 } });
+  let scenarioFetched = 0;
+  await scenarioPage.route(`${ORIGIN}/**`, async (route) => {
+    scenarioFetched++;
+    await route.abort();
+  });
+  const scenarioErrors = [];
+  scenarioPage.on("pageerror", (e) => scenarioErrors.push(e.message));
+  await scenarioPage.goto(`file://${scenarioPath}`);
+  await scenarioPage.waitForFunction(
+    () => document.getElementById("status").textContent.startsWith("Restored"), null, { timeout: 60000 },
+  ).catch(() => {});
+  await scenarioPage.waitForTimeout(500);
+  const reopened = await scenarioPage.evaluate(() => ({
+    preset: document.getElementById("spectrum-preset").value,
+    line: document.getElementById("preset-flux").textContent,
+    live: !document.getElementById("use-preset-flux").disabled,
+    rows: document.querySelectorAll("#schedule tr").length,
+    peak: Math.max(...document.getElementById("plot-activity").data.flatMap((t) => t.y.filter((v) => v != null))),
+  }));
+  eq(reopened.preset === "hcll-tf" && reopened.line === fluxLine("hcll-tf") && reopened.live && reopened.rows === 21
+    && reopened.peak === scenarioPeak && scenarioFetched === 0 && scenarioErrors.length === 0, true,
+    "and its session reopens on the preset, its flux line and the 21 rows, with the same peak and no fetch");
+  await scenarioPage.close();
+  await page.click("#scenario-one-year");
+  await page.fill('#schedule input[data-k="rate"]', "1e14");
+  await page.selectOption("#spectrum-preset", offered[0]);
+  const defaultAgain = await solve();
+  if (defaultAgain === base) ok("and the default schedule and preset come back exactly");
+  else fail(`after the scenario the default gave ${defaultAgain.toExponential(6)} against ${base.toExponential(6)}`);
 
   await page.fill("#volume", String(Number(volume) * 2));
   const doubled = await solve();

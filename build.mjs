@@ -83,12 +83,13 @@ async function main() {
   }
   const wheel = localWheel && basename(localWheel);
 
-  const [html, appJs, plotsJs, pythonJs, rangesJs, spectraJs, workerJs, wasm, glue, plotly] = await Promise.all([
+  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, workerJs, wasm, glue, plotly] = await Promise.all([
     read(SRC, "index.html").then(String),
     read(SRC, "app.js").then(String),
     read(SRC, "plots.js").then(String),
     read(SRC, "python.js").then(String),
     read(SRC, "ranges.js").then(String),
+    read(SRC, "schedules.js").then(String),
     read(SRC, "spectra.js").then(String),
     read(SRC, "worker.js").then(String),
     read(VENDOR, "yani_wasm_bg.wasm"),
@@ -96,14 +97,16 @@ async function main() {
     read(VENDOR, "plotly-basic.min.js"),
   ]);
 
-  // plots.js, python.js, ranges.js and spectra.js are imported by app.js as
-  // modules. With everything inlined into one <script type="module"> there is
-  // no module graph left to resolve, so the imports are dropped and the files
-  // concatenated -- app.js last, since it is the one calling into the others.
-  const app = appJs.replace(/^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|spectra)\.js";\s*$/gm, "");
+  // plots.js, python.js, ranges.js, schedules.js and spectra.js are imported
+  // by app.js as modules. With everything inlined into one
+  // <script type="module"> there is no module graph left to resolve, so the
+  // imports are dropped and the files concatenated -- app.js last, since it is
+  // the one calling into the others.
+  const app = appJs.replace(/^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra)\.js";\s*$/gm, "");
   const plots = plotsJs.replace(/^export\s+/gm, "");
   const python = pythonJs.replace(/^export\s+/gm, "");
   const ranges = rangesJs.replace(/^export\s+/gm, "");
+  const schedules = schedulesJs.replace(/^export\s+/gm, "");
   const spectra = spectraJs.replace(/^export\s+/gm, "");
 
   const plotlyGz = gzipSync(plotly, { level: 9 });
@@ -115,7 +118,7 @@ async function main() {
     .replace('"__WASM_JS__"', JSON.stringify(glue))
     .replace('"__WORKER_JS__"', JSON.stringify(workerJs))
     .replace('"__PLOTLY_GZ_B64__"', JSON.stringify(b64(plotlyGz)))
-    .replace("__APP_JS__", () => `${plots}\n${python}\n${ranges}\n${spectra}\n${app}`);
+    .replace("__APP_JS__", () => `${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
 
   // A leftover placeholder means the page would fetch from vendor/ at runtime
   // and silently stop being self-contained, which is the one property the
@@ -146,7 +149,7 @@ async function main() {
     `  wasm          ${mb(wasm.length)} raw -> ${mb(b64(wasm).length)} base64\n` +
     `  plotly-basic  ${mb(plotly.length)} raw -> ${mb(plotlyGz.length)} gzip ` +
     `-> ${mb(b64(plotlyGz).length)} base64\n` +
-    `  page + code   ${mb(html.length + app.length + plots.length + pythonJs.length + rangesJs.length + workerJs.length + glue.length)}\n` +
+    `  page + code   ${mb(html.length + app.length + plots.length + pythonJs.length + rangesJs.length + schedulesJs.length + workerJs.length + glue.length)}\n` +
     `  spectra       ${mb(spectraJs.length)}\n` +
     `Python tab, loaded when first opened: ${mb(tabBytes)} beside the page, ` +
     `Pyodide ${tab.pyodideVersion} from the CDN, ` +
