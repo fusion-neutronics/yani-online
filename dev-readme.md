@@ -38,14 +38,14 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 6.61 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 6.82 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 5.80 MB |
+| wasm (base64) | 6.01 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
 | page and application code | 0.20 MB |
 | spectrum presets | 0.16 MB |
@@ -57,24 +57,25 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces more than core's CI does (4.35 MB for
-yani-core-0.21.3 and 0.21.1, against 4.30 MB for 0.21.0, 2.40 MB for 0.17.0
+so a local `wasm-pack build` produces more than core's CI does (4.51 MB for
+yani-core-0.22.0, against 4.35 MB for 0.21.3 and 0.21.1, 4.30 MB for 0.21.0, 2.40 MB for 0.17.0
 and 2.11 MB for 0.11.0; the solver grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
 re-vendoring means downloading an asset rather than reproducing a toolchain. Core
 now tags one release for both of its cores, so the tag carries both names:
 
 ```bash
-gh release download 'yamc-core-0.16.3,yani-core-0.21.3' -R fusion-neutronics/core \
+gh release download 'yamc-core-0.17.0,yani-core-0.22.0' -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yamc-core-0.16.3,yani-core-0.21.3' > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yamc-core-0.17.0,yani-core-0.22.0' > vendor/CORE_COMMIT`.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
-is where a changed export or signature would show. From yani-core-0.18.0 to
+is where a changed export or signature would show. From 0.21.3 to 0.22.0 it
+did not change at all. From yani-core-0.18.0 to
 0.21.0 only the doc comments moved: `run()` documents the `photon_continua` and
 `gas_production_appm` it now adds to each step, which the page does not read
 yet.
@@ -96,7 +97,7 @@ and against core's fixtures alike; yani-core-0.21.0 reads that data. A release
 in a format the vendored solver does not read is refused before any of its
 files are fetched, since `latest.json` names its `format_version`
 (`SUPPORTED_FORMAT_VERSIONS` in `src/ranges.js`, core's own list, `2` for
-0.21.3); a schema change within a format shows only when the chain loads.
+0.22.0); a schema change within a format shows only when the chain loads.
 
 ## Iterating without a build
 
@@ -412,8 +413,10 @@ query.
 
 The five data subsections are chosen independently, because each library
 publishes only some of what a calculation needs. ENDF/B-VIII.1 is the default
-throughout: it is what the rest of the stack defaults to, so a calculation set up
-here matches one set up in the wheel without being told to. Three libraries
+throughout. The wheels have no default for the transmutation subsections (since
+yani-core 0.22.0 and yamc-core 0.17.0 a calculation that reads an unset one is
+refused), so the page picks one, and the Python it generates sets every
+subsection explicitly. Three libraries
 publish a complete self-consistent network -- it, JEFF-4.0 and JENDL-5.0. TENDL
 covers far more parent nuclides for the reactions subsection and is usually the
 better choice there, but it publishes no decay data, so defaulting to it would
