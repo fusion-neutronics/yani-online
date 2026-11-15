@@ -10,7 +10,7 @@ import yani
 
 # The cross sections, and the parts of the transmutation chain, from one
 # library.
-yani.cross_section_data = "endf-b8.1"
+yani.neutron_cross_section_data = "endf-b8.1"
 yani.transmutation_decay_data = "endf-b8.1"
 yani.transmutation_reactions = "endf-b8.1"
 yani.transmutation_fission_yields = "endf-b8.1"

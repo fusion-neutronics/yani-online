@@ -797,7 +797,7 @@ def main() -> None:
         raise SystemExit("the page's presets and data files need all four blankets: pass --out and --data "
                          "elsewhere for a subset")
 
-    yamc.cross_section_data = LIBRARY
+    yamc.neutron_cross_section_data = LIBRARY
     rate = tm.source_rate()
     print(f"yamc-core {yamc.__version__}, {LIBRARY}; {tm.FUSION_POWER_MW:.0f} MW, {rate:.4g} n/s, "
           f"plasma-facing area {tm.first_wall_area() / 1e4:.0f} m2, mean wall load "
