@@ -45,7 +45,7 @@ fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 6.01 MB |
+| wasm (base64) | 6.15 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
 | page and application code | 0.20 MB |
 | spectrum presets | 0.16 MB |
@@ -57,25 +57,26 @@ before base64 and inflated with `DecompressionStream`, which is 0.45 MB against
 
 The wasm is the `wasm-opt`-optimised build, taken from a core release rather
 than built here: binaryen cannot be downloaded through this environment's proxy,
-so a local `wasm-pack build` produces more than core's CI does (4.61 MB for
-yani-core-0.24.0, against 4.51 MB for 0.22.0, 4.35 MB for 0.21.3 and 0.21.1, 4.30 MB for 0.21.0, 2.40 MB for 0.17.0
+so a local `wasm-pack build` produces more than core's CI does (4.62 MB for
+yani-core-0.28.0, against 4.61 MB for 0.24.0, 4.51 MB for 0.22.0, 4.35 MB for 0.21.3 and 0.21.1, 4.30 MB for 0.21.0, 2.40 MB for 0.17.0
 and 2.11 MB for 0.11.0; the solver grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
 re-vendoring means downloading an asset rather than reproducing a toolchain. Core
 now tags one release for both of its cores, so the tag carries both names:
 
 ```bash
-gh release download 'yamc-core-0.20.0,yani-core-0.24.0' -R fusion-neutronics/core \
+gh release download 'yamc-core-0.24.0,yani-core-0.28.0' -R fusion-neutronics/core \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yamc-core-0.20.0,yani-core-0.24.0' > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yamc-core-0.24.0,yani-core-0.28.0' > vendor/CORE_COMMIT`.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
-is where a changed export or signature would show. From 0.21.3 to 0.22.0 it
-did not change at all. From yani-core-0.18.0 to
+is where a changed export or signature would show. From 0.22.0 to 0.28.0 it
+did not change at all (the generated glue, `yani_wasm.js`, is byte-identical
+too), nor from 0.21.3 to 0.22.0. From yani-core-0.18.0 to
 0.21.0 only the doc comments moved: `run()` documents the `photon_continua` and
 `gas_production_appm` it now adds to each step, which the page does not read
 yet.
@@ -93,11 +94,14 @@ began carrying the decay energy split (fusion-neutronics/core#155):
 "decay/nuclides.arrow has columns the schema does not declare", naming
 `decay_energy_alpha`, `decay_energy_beta`, `decay_energy_gamma` and their
 uncertainties. So with it every load stopped at the chain, against the origin
-and against core's fixtures alike; yani-core-0.21.0 reads that data. A release
+and against core's fixtures alike; yani-core-0.21.0 reads that data. It
+happened again with ENDF/B-8.1 release 2026-11-13, still format 2, whose decay
+data adds `excitation_energy` and `level_index`: yani-core-0.22.0 refuses it
+the same way, and 0.28.0 reads it. A release
 in a format the vendored solver does not read is refused before any of its
 files are fetched, since `latest.json` names its `format_version`
 (`SUPPORTED_FORMAT_VERSIONS` in `src/ranges.js`, core's own list, `2` for
-0.22.0); a schema change within a format shows only when the chain loads.
+0.28.0); a schema change within a format shows only when the chain loads.
 
 ## Iterating without a build
 

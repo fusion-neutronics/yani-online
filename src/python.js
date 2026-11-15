@@ -187,7 +187,7 @@ import plotly.graph_objects as go
 #
 # Each subsection is sourced independently, so a network can mix libraries.
 # These are the five the page had selected.
-yani.cross_section_data = ${str(libraries.xs)}
+yani.neutron_cross_section_data = ${str(libraries.xs)}
 yani.transmutation_decay_data = ${str(libraries.decay)}
 yani.transmutation_reactions = ${str(libraries.reactions)}
 yani.transmutation_fission_yields = ${str(libraries.fission_yields)}
