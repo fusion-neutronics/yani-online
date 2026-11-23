@@ -143,6 +143,9 @@
 
   label { display: block; font-size: .85rem; margin-bottom: .65rem; }
   label > span { display: block; color: var(--muted); margin-bottom: .2rem; }
+  /* A label with hover text says so, since a title attribute is otherwise invisible. */
+  label[title] { cursor: help; }
+  label[title] > span::after { content: " \24D8"; }
   input, select, button, textarea {
     font: inherit;
     color: var(--ink);
@@ -495,28 +498,38 @@
     <!-- ---------------------------------------------------------------- -->
     <section class="panel">
       <h2>Nuclear data</h2>
-      <p class="note" style="margin-top:0">
-        Each subsection is sourced independently, so a network can mix libraries.
-        Only libraries that publish a given subsection are offered.
+      <!-- The question readers ask here is how "Cross sections" differs from
+           "Transmutation reactions", so the note answers it before the
+           dropdowns, and each label carries the long form as hover text.
+           Hover is not available on touch screens, so the note has to stand
+           on its own. -->
+      <p class="note" style="margin:0 0 .75rem">
+        There is one set of cross sections. <b>Cross sections</b> say how
+        fast each reaction runs; the <b>reaction network</b> says which
+        reactions exist and what each one makes, and holds no cross sections
+        of its own. The other three say what happens to the products after.
+        Each is sourced independently, so a network can mix libraries, and
+        only libraries that publish a given part are offered. Hover a label
+        for more.
       </p>
-      <label>
-        <span>Cross sections</span>
+      <label title="Neutron cross sections, sigma(E), for every nuclide in the material and every product it makes. Folded with the spectrum to give each reaction's rate, so this decides how fast each reaction runs. It is the only cross-section data the calculation uses.">
+        <span>Cross sections: how fast each reaction runs</span>
         <select id="data-xs"></select>
       </label>
-      <label>
-        <span>Transmutation reactions</span>
+      <label title="The transmutation network: which reactions each nuclide has and which product each makes, e.g. Fe56 (n,p) gives Mn56, with its Q value. It holds no cross sections; the rates come from Cross sections above. Decides which products can appear at all: a product missing from the network is never made, whatever the cross sections say. TENDL's network covers far more nuclides than the others.">
+        <span>Reaction network: which products are made</span>
         <select id="data-reactions"></select>
       </label>
-      <label>
-        <span>Decay data</span>
+      <label title="Half-lives, decay modes and their branching, mean decay energies and decay photon lines. Decides how the inventory decays and so its activity, decay heat and contact dose. TENDL and FENDL publish none, so it comes from ENDF/B, JEFF or JENDL.">
+        <span>Decay data: how the products decay</span>
         <select id="data-decay"></select>
       </label>
-      <label>
-        <span>Fission yields</span>
+      <label title="Which fission products a fission makes, and how many of each, at a few incident energies. Only matters when the material contains fissionable nuclides.">
+        <span>Fission yields: what a fission makes</span>
         <select id="data-fpy"></select>
       </label>
-      <label>
-        <span>Isomeric branching</span>
+      <label title="How a reaction's product splits between its ground state and its metastable (isomeric) states, against incident energy, e.g. Co59 (n,g) giving Co60 or Co60m. Without it every product lands in its ground state.">
+        <span>Isomeric branching: ground or metastable state</span>
         <select id="data-branching"></select>
       </label>
     </section>
