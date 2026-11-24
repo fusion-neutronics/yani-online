@@ -66,16 +66,18 @@ release of both cores carries both names in its tag
 (`yamc-core-0.24.0,yani-core-0.28.0`), and one of yani-core alone only its own:
 
 ```bash
-gh release download 'yamc-core-0.26.0,yani-core-0.32.0' -R fusion-neutronics/core \
+gh release download 'yamc-core-0.27.0,yani-core-0.33.0' -R fusion-neutronics/core-archived-nov-26 \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yamc-core-0.26.0,yani-core-0.32.0' > vendor/CORE_COMMIT`.
+`git -C ../core rev-list -n 1 'yamc-core-0.27.0,yani-core-0.33.0' > vendor/CORE_COMMIT`.
+Releases up to this one live in `fusion-neutronics/core-archived-nov-26`, the
+renamed old core repo.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
-is where a changed export or signature would show. From 0.22.0 to 0.32.0 it
+is where a changed export or signature would show. From 0.22.0 to 0.33.0 it
 did not change at all (the generated glue, `yani_wasm.js`, is byte-identical
 too), nor from 0.21.3 to 0.22.0. From yani-core-0.18.0 to
 0.21.0 only the doc comments moved: `run()` documents the `photon_continua` and
