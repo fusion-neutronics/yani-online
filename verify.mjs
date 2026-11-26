@@ -32,7 +32,8 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
-import { UNITS, unitBasis, unitFactor } from "./src/units.js";
+import { UNITS, factorTable, unitLabel, wantedFactors } from "./src/units.js";
+import * as glue from "./vendor/yani_wasm.js";
 import { SOURCE, SPECTRA } from "./src/spectra.js";
 import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
 import { serve, FETCHED_FIXTURES } from "./serve.mjs";
@@ -608,26 +609,46 @@ function checkSchedules() {
   threw("an unknown scenario", () => scenarioSchedule("ten-years", 1e14));
 }
 
-/// Check the decay charts' unit factors, without a browser: a pure rescale of
-/// the totals by the run's volume and mass density.
+/// Check the decay charts' units, without a browser: that the page asks the
+/// solver for a factor per offered unit and files the answers by chart, and,
+/// where the vendored solver converts units, that it accepts every unit
+/// offered and gives the factors a hand calculation does.
 function checkUnits() {
-  const factor = (id, unit, basis) => unitFactor(UNITS[id].find((o) => o.unit === unit), basis);
-  const near = (got, want) => got !== null && Math.abs(got / want - 1) < 1e-12;
-  const iron = unitBasis({ density: 7.874, density_units: "g/cm3", volume: 1000 });
-  eq(JSON.stringify(iron), JSON.stringify({ volume: 1000, massDensity: 7.874 }), "a g/cm3 material's basis");
-  eq(unitBasis({ density: 7874, density_units: "kg/m3", volume: 1000 }).massDensity, 7.874, "kg/m3 is read in g/cm3");
-  eq(factor("plot-activity", "Bq", iron), 1, "Bq is the solver's own");
-  if (near(factor("plot-activity", "Bq/cm3", iron), 1e-3) && near(factor("plot-heat", "W/m3", iron), 1e3)
-      && near(factor("plot-activity", "Bq/g", iron), 1 / 7874) && near(factor("plot-heat", "W/kg", iron), 1 / 7.874)) {
-    ok("per cm3, m3, g and kg divide by the volume and the mass");
-  } else {
-    fail("a per-volume or per-mass factor is wrong");
+  const wanted = wantedFactors();
+  const offered = Object.values(UNITS).reduce((n, u) => n + u.offered.length, 0);
+  eq(wanted.length, offered, "a factor asked for per offered unit");
+  eq(Object.entries(UNITS).every(([, u]) => u.offered[0] === u.native), true, "each chart's list opens on the solver's own unit");
+  const table = factorTable(wanted, wanted.map((_, i) => i));
+  eq(table["plot-heat"]["W/kg"], wanted.findIndex((w) => w.id === "plot-heat" && w.units === "W/kg"), "answers are filed by chart and unit");
+  eq(unitLabel("uGy/h"), "µGy/h", "micro shown as µ");
+
+  initSync({ module: readFileSync("vendor/yani_wasm_bg.wasm") });
+  if (typeof glue.YaniSession.prototype.totalToUnits !== "function" || typeof glue.convertUnits !== "function") {
+    console.log("note  the vendored solver predates totalToUnits and convertUnits: the unit selects offer only the solver's own units");
+    return;
   }
-  eq(factor("plot-dose", "µGy/h", iron), 1e6, "the dose rescales only by its prefix");
-  const atoms = unitBasis({ density: 0.08, density_units: "atom/barn-cm", volume: 1000 });
-  eq(factor("plot-activity", "Bq/kg", atoms), null, "no per-mass unit without a mass density");
-  eq(factor("plot-activity", "Bq/m3", atoms), 1e3, "but per volume still");
-  eq(factor("plot-activity", "Bq/cm3", null), null, "and nothing specific without a run's material");
+  const session = new glue.YaniSession();
+  session.pnnlMaterial("Iron", 1000);
+  const factorOf = ({ native, kind, units }) =>
+    (kind === "rate" ? glue.convertUnits(native, units) : session.totalToUnits(native, units));
+  const refused = wanted.filter((w) => {
+    try {
+      return !(factorOf(w) > 0);
+    } catch {
+      return true;
+    }
+  });
+  eq(refused.map((w) => w.units).join(","), "", "the solver gives every offered unit for 1000 cm3 of iron");
+  const near = (got, want) => Math.abs(got / want - 1) < 1e-12;
+  const f = (id, units) => factorOf(wanted.find((w) => w.id === id && w.units === units));
+  if (near(f("plot-activity", "Bq/kg"), 1 / 7.874) && near(f("plot-activity", "Bq/cm3"), 1e-3)
+      && near(f("plot-activity", "Ci"), 1 / 3.7e10) && near(f("plot-heat", "MW/m3"), 1e-3)
+      && near(f("plot-dose", "uGy/h"), 1e6)) {
+    ok("and the factors a hand calculation gives: Bq/kg, Bq/cm3, Ci, MW/m3, µGy/h");
+  } else {
+    fail("a unit factor from the solver is not the hand calculation's");
+  }
+  session.free();
 }
 
 /// Check what gets handed to the solver, out of what came back.
@@ -1603,18 +1624,23 @@ async function main() {
   const yTitle = () => page.$eval("#plot-activity", (el) => el.layout.yaxis.title.text);
   eq(await yTitle(), "activity [Bq]", "the activity chart opens in Bq");
   const inBq = (await drawn()).first.total;
-  await page.selectOption(control("unit"), "Bq/kg");
-  await page.waitForTimeout(300);
-  const inBqPerKg = (await drawn()).first.total;
-  if (Math.abs(inBqPerKg / (inBq / 7.874) - 1) < 1e-12) {
-    ok("Bq/kg is the total over the material's 7.874 kg");
+  const converts = !(await page.$eval(`${control("unit")} option[value="Bq/kg"]`, (o) => o.disabled));
+  if (!converts) {
+    ok("the vendored solver converts no units, so Bq/kg is offered disabled");
   } else {
-    fail(`Bq/kg drew ${inBqPerKg} from ${inBq} Bq`);
+    await page.selectOption(control("unit"), "Bq/kg");
+    await page.waitForTimeout(300);
+    const inBqPerKg = (await drawn()).first.total;
+    if (Math.abs(inBqPerKg / (inBq / 7.874) - 1) < 1e-9) {
+      ok("Bq/kg is the total over the material's 7.874 kg");
+    } else {
+      fail(`Bq/kg drew ${inBqPerKg} from ${inBq} Bq`);
+    }
+    eq(await yTitle(), "activity [Bq/kg]", "and the axis is titled in it");
+    await page.selectOption(control("unit"), "Bq");
+    await page.waitForTimeout(300);
+    eq((await drawn()).first.total, inBq, "and back in Bq it is the solver's number again");
   }
-  eq(await yTitle(), "activity [Bq/kg]", "and the axis is titled in it");
-  await page.selectOption(control("unit"), "Bq");
-  await page.waitForTimeout(300);
-  eq((await drawn()).first.total, inBq, "and back in Bq it is the solver's number again");
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching

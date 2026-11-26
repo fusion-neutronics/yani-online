@@ -132,6 +132,13 @@ function spectrumSource(spectrum) {
 /// figures in the page rather than writing them to files.
 export function pythonScript(setup, { browser = false } = {}) {
   const { libraries, temperature, material, spectrum, schedule } = setup;
+  // The units the charts are read in, where one is not the solver's own: the
+  // script asks yani for the same unit with `units=`, and its axes say so.
+  // Left out at the defaults, so the script is the same as ever for anyone not
+  // using the select.
+  const chosen = setup.units || {};
+  const unitsArg = (id) => (chosen[id] ? `, units=${str(chosen[id])}` : "");
+  const unitOf = (id, native) => chosen[id] || native;
   const steps = schedule
     .map((s) =>
       s.kind === "pulse"
@@ -238,14 +245,14 @@ for _kind, _rate, (value, unit) in SCHEDULE:
 shutdown = max((end for (kind, _rate, _d), end in zip(SCHEDULE, ends) if kind == "pulse"), default=0.0)
 times = [(end - shutdown) / SECONDS["a"] for end in ends]
 
-activity = [m.activity(by_nuclide=True) for m in steps]
-heat = [m.decay_heat(by_nuclide=True) for m in steps]
+activity = [m.activity(by_nuclide=True${unitsArg("plot-activity")}) for m in steps]
+heat = [m.decay_heat(by_nuclide=True${unitsArg("plot-heat")}) for m in steps]
 # Left at its defaults deliberately: absorbed dose in air with a build-up factor
 # of 2.0 is exactly what the page reports, so these numbers and the browser's
 # are the same numbers. Pass dose_quantity="effective" for Sv/h instead.
-dose = [m.contact_dose(by_nuclide=True) for m in steps]
+dose = [m.contact_dose(by_nuclide=True${unitsArg("plot-dose")}) for m in steps]
 
-print(f"{len(steps)} steps, {sum(activity[0].values()):.3e} Bq at the end of the first")
+print(f"{len(steps)} steps, {sum(activity[0].values()):.3e} ${unitOf("plot-activity", "Bq")} at the end of the first")
 
 # --- plots ----------------------------------------------------------------
 #
@@ -324,10 +331,10 @@ photon_figure.update_layout(
 photon_figure.update_xaxes(type="log")
 
 figures = {
-    "activity": series_figure(activity, "Activity", "activity [Bq]"),
-    "decay_heat": series_figure(heat, "Decay heat", "decay heat [W]"),
+    "activity": series_figure(activity, "Activity", "activity [${unitOf("plot-activity", "Bq")}]"),
+    "decay_heat": series_figure(heat, "Decay heat", "decay heat [${unitOf("plot-heat", "W")}]"),
     "contact_dose": series_figure(
-        dose, "Contact dose rate, at the surface", "absorbed dose in air [Gy/h]"
+        dose, "Contact dose rate, at the surface", "absorbed dose in air [${unitOf("plot-dose", "Gy/h")}]"
     ),
     "inventory": inventory_figure,
     "photons": photon_figure,

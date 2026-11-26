@@ -19,7 +19,7 @@
 // rests on colour alone, and the low-contrast hues always carry a visible
 // label.
 
-import { UNITS, unitFactor } from "./units.js";
+import { UNITS, unitLabel } from "./units.js";
 
 const SERIES = {
   light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
@@ -185,10 +185,15 @@ const namedOf = (id) => named.get(id) || NAMED_DEFAULT;
 const scales = new Map();
 const scaleOf = (id, axis) => scales.get(`${id}.${axis}`) || "log";
 
-/// The unit each decay chart is read in, by its label in `UNITS`. Opens on the
+/// The unit each decay chart is read in, as the solver spells it. Opens on the
 /// solver's own, the whole material's Bq and W, and Gy/h.
 const units = new Map();
-const unitOf = (id) => UNITS[id].find((o) => o.unit === units.get(id)) || UNITS[id][0];
+const unitOf = (id) => units.get(id) || UNITS[id].native;
+
+/// The decay charts read in a unit other than the solver's own, by id, for the
+/// Python export.
+export const chosenUnits = () => Object.fromEntries(
+  Object.keys(UNITS).filter((id) => unitOf(id) !== UNITS[id].native).map((id) => [id, unitOf(id)]));
 
 /// Plotly positions annotations in the axis's own coordinates, which on a log
 /// axis means log10 of the value. Mixing the two puts a label thousands of
@@ -237,10 +242,11 @@ export function wireAxisScales(onChange) {
       name.textContent = "unit";
       const select = document.createElement("select");
       select.dataset.control = "unit";
-      for (const option of UNITS[id]) {
+      for (const unit of UNITS[id].offered) {
         const el = document.createElement("option");
-        el.value = el.textContent = option.unit;
-        el.selected = option === unitOf(id);
+        el.value = unit;
+        el.textContent = unitLabel(unit);
+        el.selected = unit === unitOf(id);
         select.append(el);
       }
       select.addEventListener("change", () => {
@@ -813,32 +819,30 @@ export function drawMaterial(material) {
   ), CONFIG);
 }
 
-/// The chosen unit of a chart and its factor, under what `basis` can give.
+/// The chosen unit of a chart and its factor, from the run's `factors`
+/// (`{ id: { unit: factor } }`, from the solver).
 ///
-/// A unit the run's material cannot give -- per mass, for one built from atom
-/// densities -- is disabled in the chart's unit select, and a chart left on
-/// one falls back to the solver's own unit rather than drawing nothing.
-function unitFor(id, basis) {
+/// A unit the solver refused for the run's material, or one a solver too old
+/// to convert units cannot give, is disabled in the chart's unit select, and a
+/// chart left on one falls back to the solver's own unit rather than drawing
+/// nothing.
+function unitFor(id, factors) {
+  const { native } = UNITS[id];
+  const factorOf = (unit) => (unit === native ? 1 : (factors && factors[id] && factors[id][unit]) ?? null);
   const select = document.querySelector(`.axis-scale[data-for="${id}"] select[data-control="unit"]`);
-  if (select) {
-    for (const el of select.options) {
-      const option = UNITS[id].find((o) => o.unit === el.value);
-      el.disabled = unitFactor(option, basis) === null;
-    }
-  }
-  let option = unitOf(id);
-  if (unitFactor(option, basis) === null) {
+  if (select) for (const el of select.options) el.disabled = factorOf(el.value) === null;
+  let unit = unitOf(id);
+  if (factorOf(unit) === null) {
     units.delete(id);
-    option = UNITS[id][0];
+    unit = native;
   }
-  if (select) select.value = option.unit;
-  return { unit: option.unit, factor: unitFactor(option, basis) };
+  if (select) select.value = unit;
+  return { unit: unitLabel(unit), factor: factorOf(unit) };
 }
 
-/// `basis` is the volume and mass density the run's totals are divided by for
-/// a specific unit, from `unitBasis`.
-export function drawAll(results, basis) {
-  const activity = unitFor("plot-activity", basis);
+/// `factors` is the run's unit factors, from `factorTable`.
+export function drawAll(results, factors) {
+  const activity = unitFor("plot-activity", factors);
   decaySeriesChart(
     document.getElementById("plot-activity"),
     results, "activity_by_nuclide",
@@ -846,7 +850,7 @@ export function drawAll(results, basis) {
     { key: "activity", name: "total" },
     activity.factor,
   );
-  const heat = unitFor("plot-heat", basis);
+  const heat = unitFor("plot-heat", factors);
   decaySeriesChart(
     document.getElementById("plot-heat"),
     results, "decay_heat_by_nuclide",
@@ -868,7 +872,7 @@ export function drawAll(results, basis) {
   if (results.some((r) => r.contact_dose !== undefined)) {
     wrap.hidden = false;
     if (bar && bar.classList.contains("axis-scale")) bar.hidden = false;
-    const rate = unitFor("plot-dose", basis);
+    const rate = unitFor("plot-dose", factors);
     decaySeriesChart(
       dose, results, "contact_dose_by_nuclide",
       "Contact dose rate", `contact dose [${rate.unit}]`,

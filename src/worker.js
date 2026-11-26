@@ -83,6 +83,20 @@ const api = {
   buildMaterial: (composition, density, densityUnits, fractionType, volume) =>
     session.buildMaterial(composition, density, densityUnits, fractionType, volume),
 
+  /// The factor for each `{ native, kind, units }`, or null where the solver
+  /// refuses it: `totalToUnits` turns a total of the session's material into a
+  /// specific or scaled unit, `convertUnits` one rate into another. A solver
+  /// that predates both answers null for all of them, which leaves the page
+  /// on its own units rather than failing the run.
+  unitFactors: (wanted) => wanted.map(({ native, kind, units }) => {
+    if (typeof session.totalToUnits !== "function" || typeof convertUnits !== "function") return null;
+    try {
+      return kind === "rate" ? convertUnits(native, units) : session.totalToUnits(native, units);
+    } catch {
+      return null;
+    }
+  }),
+
   addChainSections(sections) {
     for (const s of sections) session.addChainSection(s.subsection, s.file, s.bytes);
   },

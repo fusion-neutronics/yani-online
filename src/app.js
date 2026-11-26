@@ -10,8 +10,8 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
-import { unitBasis } from "./units.js";
+import { chosenUnits, drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, scenarioSchedule } from "./schedules.js";
@@ -131,9 +131,9 @@ const state = {
   // temperature.
   dataKey: null,
   results: null,
-  // The volume and mass density the results' totals are divided by for a
-  // per-volume or per-mass unit, from `unitBasis`, set with the results.
-  resultsBasis: null,
+  // The factor from the solver's unit to each unit a decay chart offers, for
+  // the material the results are of, from `runUnitFactors`, set with them.
+  resultsUnits: null,
   // A year of irradiation, then ten cooling steps at cumulative times spaced
   // log-evenly from a second to ten years: the "One year, then cooling"
   // scenario, so the default and the button are one definition. Log-spaced
@@ -231,6 +231,7 @@ class Solver {
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
   materialJson() { return this.call("materialJson"); }
+  unitFactors(wanted) { return this.call("unitFactors", [wanted]); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
   loadChain() { return this.call("loadChain"); }
   reset() { return this.call("reset"); }
@@ -813,6 +814,7 @@ async function currentSetup() {
     material,
     spectrum,
     schedule: state.schedule.map((s) => ({ ...s })),
+    units: chosenUnits(),
   };
 }
 
@@ -1031,7 +1033,7 @@ function showResults() {
     slider.value = String(state.results.length - 1);
     $(`${id}-label`).value = state.results.length;
   }
-  drawAll(state.results, state.resultsBasis);
+  drawAll(state.results, state.resultsUnits);
   drawInventory(state.results, state.results.length - 1);
   drawPhotons(state.results, state.results.length - 1);
 }
@@ -1151,10 +1153,10 @@ async function restoreSession(session) {
   state.schedule = setup.schedule.map((step) => ({ ...step }));
   renderSchedule();
 
-  // The form now describes the saved run's material, so the solver can say
-  // what its totals are per, for the unit selects, without solving anything.
+  // The form now describes the saved run's material, so the solver can give
+  // the unit selects their factors without solving anything.
   await applyMaterial(state.solver);
-  state.resultsBasis = unitBasis(await state.solver.materialJson());
+  state.resultsUnits = await runUnitFactors();
   state.results = results;
   showResults();
   refreshSpectrum();
@@ -1165,6 +1167,15 @@ async function restoreSession(session) {
     `${results.length} steps. Run to recompute it, which fetches the data again.`);
 }
 
+/// The factor from the solver's unit to every unit the decay charts offer, for
+/// the material the solver holds now. One round trip for all of them: they are
+/// pure arithmetic on the material, so asking once per run is what lets a unit
+/// change rescale the charts without a solve.
+async function runUnitFactors() {
+  const wanted = wantedFactors();
+  return factorTable(wanted, await state.solver.unitFactors(wanted));
+}
+
 async function run() {
   const btn = $("run");
   btn.disabled = true;
@@ -1172,10 +1183,10 @@ async function run() {
   $("progress").hidden = false;
   try {
     await applyMaterial(state.solver);
-    // What the totals are per, for the unit selects: the material this run
-    // solves, kept with its results rather than read off a form that may
-    // since have moved on.
-    const basis = unitBasis(await state.solver.materialJson());
+    // The unit selects' factors, for the material this run solves, kept with
+    // its results rather than asked of a material the form may since have
+    // moved on to.
+    const unitFactors = await runUnitFactors();
     await ensureData();
     const spectrum = await currentSpectrum();
     const schedule = await currentSchedule(state.solver);
@@ -1196,7 +1207,7 @@ async function run() {
     } finally {
       clearInterval(tick);
     }
-    state.resultsBasis = basis;
+    state.resultsUnits = unitFactors;
     showResults();
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
@@ -1597,7 +1608,7 @@ async function main() {
     } else if (state.results) {
       if (id === "plot-photons") drawPhotons(state.results, Number($("photon-step").value));
       else if (id === "plot-inventory") drawInventory(state.results, Number($("inventory-step").value));
-      else drawAll(state.results, state.resultsBasis);
+      else drawAll(state.results, state.resultsUnits);
     }
   });
 
@@ -1608,7 +1619,7 @@ async function main() {
     refreshSpectrum();
     drawMaterial(state.material);
     if (state.results) {
-      drawAll(state.results, state.resultsBasis);
+      drawAll(state.results, state.resultsUnits);
       drawInventory(state.results, Number($("inventory-step").value));
       drawPhotons(state.results, Number($("photon-step").value));
     }
