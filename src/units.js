@@ -24,11 +24,12 @@ export const UNITS = {
   },
   // Absorbed dose in air only: the browser's run computes no effective dose,
   // so there are no Sv units to offer. Per year as well as per hour, for a
-  // dose rate read against an annual limit.
+  // dose rate read against an annual limit, with the year written "a", the
+  // solver's only spelling of it.
   "plot-dose": {
     native: "Gy/h",
     kind: "rate",
-    offered: ["Gy/h", "mGy/h", "uGy/h", "mGy/year", "uGy/year"],
+    offered: ["Gy/h", "mGy/h", "uGy/h", "mGy/a", "uGy/a"],
   },
 };
 

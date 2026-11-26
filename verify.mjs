@@ -643,8 +643,8 @@ function checkUnits() {
   const f = (id, units) => factorOf(wanted.find((w) => w.id === id && w.units === units));
   if (near(f("plot-activity", "Bq/kg"), 1 / 7.874) && near(f("plot-activity", "Bq/cm3"), 1e-3)
       && near(f("plot-activity", "Ci"), 1 / 3.7e10) && near(f("plot-heat", "MW/m3"), 1e-3)
-      && near(f("plot-dose", "uGy/h"), 1e6) && near(f("plot-dose", "mGy/year"), 1e3 * 24 * 365.25)) {
-    ok("and the factors a hand calculation gives: Bq/kg, Bq/cm3, Ci, MW/m3, µGy/h, mGy/year");
+      && near(f("plot-dose", "uGy/h"), 1e6) && near(f("plot-dose", "mGy/a"), 1e3 * 24 * 365.25)) {
+    ok("and the factors a hand calculation gives: Bq/kg, Bq/cm3, Ci, MW/m3, µGy/h, mGy/a");
   } else {
     fail("a unit factor from the solver is not the hand calculation's");
   }
