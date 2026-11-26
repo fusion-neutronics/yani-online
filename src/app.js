@@ -1075,7 +1075,9 @@ async function gzipToB64(text) {
 async function sessionDocument(session) {
   const doc = document.documentElement.cloneNode(true);
   for (const el of doc.querySelectorAll(".plot")) el.replaceChildren();
-  for (const el of doc.querySelectorAll('.axis-scale, #yani-session, style[id^="plotly"]')) el.remove();
+  // A chart shown as its table hides its plot; boot shows charts.
+  for (const el of doc.querySelectorAll(".plot-wrap")) el.hidden = false;
+  for (const el of doc.querySelectorAll('.axis-scale, .decay-table, #yani-session, style[id^="plotly"]')) el.remove();
   doc.querySelector("#results").hidden = true;
   doc.querySelector("#results-empty").hidden = false;
   doc.querySelector("#material-steps").hidden = true;

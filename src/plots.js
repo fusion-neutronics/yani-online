@@ -20,6 +20,7 @@
 // label.
 
 import { UNITS, isTotal, unitLabel } from "./units.js";
+import { SHARE_FLOOR, shareTable } from "./tables.js";
 
 const SERIES = {
   light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
@@ -204,6 +205,10 @@ export function chosenUnits(converts) {
     Object.keys(UNITS).filter((id) => unit(id) !== UNITS[id].native).map((id) => [id, unit(id)]));
 }
 
+/// The decay charts shown as a table instead, by id. The chart is the default:
+/// the table is for reading off numbers, the chart for seeing the shape.
+const tables = new Set();
+
 /// Plotly positions annotations in the axis's own coordinates, which on a log
 /// axis means log10 of the value. Mixing the two puts a label thousands of
 /// decades off-plot -- invisible, and silently so.
@@ -242,6 +247,7 @@ export function wireAxisScales(onChange) {
         scales.set(`${id}.${axis}`, select.value);
         onChange(id);
       });
+      label.dataset.plotOnly = "";
       label.append(name, select);
       bar.append(label);
     }
@@ -281,6 +287,7 @@ export function wireAxisScales(onChange) {
         named.set(id, Number(select.value));
         onChange(id);
       });
+      count.dataset.plotOnly = "";
       count.append(countName, select);
       bar.append(count);
       for (const [key, text] of [["total", "total"], ["byNuclide", "by nuclide"]]) {
@@ -295,12 +302,88 @@ export function wireAxisScales(onChange) {
           views.set(id, { ...viewOf(id), [key]: check.checked });
           onChange(id);
         });
+        label.dataset.plotOnly = "";
         label.append(name, check);
         bar.append(label);
       }
+      // Plot or table, last in the row since it changes what the rest mean:
+      // in a table the scales, the count and the breakdown do nothing, so they
+      // are hidden while it is up.
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.dataset.control = "table";
+      check.checked = tables.has(id);
+      const name = document.createElement("span");
+      name.textContent = "table";
+      check.addEventListener("change", () => {
+        if (check.checked) tables.add(id);
+        else tables.delete(id);
+        onChange(id);
+      });
+      label.append(name, check);
+      bar.append(label);
+      const table = document.createElement("div");
+      table.className = "decay-table";
+      table.dataset.for = id;
+      table.hidden = true;
+      (plot.closest(".plot-wrap") || plot).after(table);
     }
     bar.dataset.for = id;
     (plot.closest(".plot-wrap") || plot).before(bar);
+  }
+}
+
+/// A decay chart's results as a handbook table in `host`: a column per
+/// cooling time, the total in the chosen unit, then each nuclide's share.
+function drawShareTable(host, results, key, title, total, unit, factor) {
+  const shutdown = shutdownTime(results);
+  const { columns, rows } = shareTable(
+    results.map((r) => r[key] || {}),
+    results.map((r) => r[total.key] || 0),
+    results.map((r) => r.time - shutdown),
+    factor,
+  );
+  const cell = (tag, text, className) => {
+    const el = document.createElement(tag);
+    el.textContent = text;
+    if (className) el.className = className;
+    return el;
+  };
+  const table = document.createElement("table");
+  table.className = "share-table";
+  const head = document.createElement("tr");
+  head.append(cell("th", title), ...columns.map((c) => cell("th", c.label, "num")));
+  const totals = document.createElement("tr");
+  totals.className = "total";
+  totals.append(cell("th", unit), ...columns.map((c) => cell("td", c.total.toExponential(2), "num")));
+  const body = rows.map((row) => {
+    const tr = document.createElement("tr");
+    tr.append(cell("th", row.name), ...row.shares.map((s) => cell("td", s === null ? "" : s.toFixed(1), "num")));
+    return tr;
+  });
+  table.append(head, totals, ...body);
+  const note = cell("p", `Each nuclide as a percentage of its column's total, blank below ${SHARE_FLOOR}%. ` +
+    "Columns are the steps at and after shutdown.", "note");
+  host.replaceChildren(table, note);
+}
+
+/// Draw one decay quantity as its chart or its table, whichever is chosen,
+/// and show the controls that mean something for it.
+function drawDecay(id, results, run, key, title, axisName, total) {
+  const el = document.getElementById(id);
+  const wrap = el.closest(".plot-wrap") || el;
+  const bar = document.querySelector(`.axis-scale[data-for="${id}"]`);
+  const host = document.querySelector(`.decay-table[data-for="${id}"]`);
+  const { unit, factor } = unitFor(id, run);
+  const asTable = tables.has(id) && host;
+  if (bar) for (const label of bar.querySelectorAll("[data-plot-only]")) label.hidden = Boolean(asTable);
+  wrap.hidden = Boolean(asTable);
+  if (host) host.hidden = !asTable;
+  if (asTable) {
+    drawShareTable(host, results, key, title, total, unit, factor);
+  } else {
+    decaySeriesChart(el, results, key, title, `${axisName} [${unit}]`, total, factor);
   }
 }
 
@@ -858,22 +941,10 @@ function unitFor(id, run) {
 /// `run` is the run's unit factors and what its totals are for, from
 /// `runUnits` in app.js.
 export function drawAll(results, run) {
-  const activity = unitFor("plot-activity", run);
-  decaySeriesChart(
-    document.getElementById("plot-activity"),
-    results, "activity_by_nuclide",
-    "Activity", `activity [${activity.unit}]`,
-    { key: "activity", name: "total" },
-    activity.factor,
-  );
-  const heat = unitFor("plot-heat", run);
-  decaySeriesChart(
-    document.getElementById("plot-heat"),
-    results, "decay_heat_by_nuclide",
-    "Decay heat", `decay heat [${heat.unit}]`,
-    { key: "decay_heat", name: "total" },
-    heat.factor,
-  );
+  drawDecay("plot-activity", results, run, "activity_by_nuclide",
+    "Activity", "activity", { key: "activity", name: "total" });
+  drawDecay("plot-heat", results, run, "decay_heat_by_nuclide",
+    "Decay heat", "decay heat", { key: "decay_heat", name: "total" });
   // Absorbed dose in air, at a build-up factor of 2, in Gy/h or a fraction. A slab estimate
   // rather than a transport result, so it carries no distance: it is the dose
   // with a hand on the material, and a bigger piece of the same material reads
@@ -884,20 +955,16 @@ export function drawAll(results, run) {
   // material that gives no dose, which is a different and alarming claim.
   const dose = document.getElementById("plot-dose");
   const wrap = dose.closest(".plot-wrap") || dose;
-  const bar = wrap.previousElementSibling;
+  const bar = document.querySelector('.axis-scale[data-for="plot-dose"]');
+  const table = document.querySelector('.decay-table[data-for="plot-dose"]');
   if (results.some((r) => r.contact_dose !== undefined)) {
-    wrap.hidden = false;
-    if (bar && bar.classList.contains("axis-scale")) bar.hidden = false;
-    const rate = unitFor("plot-dose", run);
-    decaySeriesChart(
-      dose, results, "contact_dose_by_nuclide",
-      "Contact dose rate", `contact dose [${rate.unit}]`,
-      { key: "contact_dose", name: "total" },
-      rate.factor,
-    );
+    if (bar) bar.hidden = false;
+    drawDecay("plot-dose", results, run, "contact_dose_by_nuclide",
+      "Contact dose rate", "contact dose", { key: "contact_dose", name: "total" });
   } else {
     wrap.hidden = true;
-    if (bar && bar.classList.contains("axis-scale")) bar.hidden = true;
+    if (bar) bar.hidden = true;
+    if (table) table.hidden = true;
   }
 }
 

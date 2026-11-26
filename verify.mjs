@@ -34,6 +34,7 @@ import {
 import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
 import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
+import { SHARE_FLOOR, coolingLabel, shareTable } from "./src/tables.js";
 import { SOURCE, SPECTRA } from "./src/spectra.js";
 import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
 import { serve, FETCHED_FIXTURES } from "./serve.mjs";
@@ -662,6 +663,32 @@ function checkUnits() {
   session.free();
 }
 
+/// Check the handbook tables the decay charts switch to, without a browser.
+function checkTables() {
+  const day = UNIT_SECONDS.d;
+  eq([0, 1, 8.8, 320, 5400, 3.7 * day, UNIT_SECONDS.a, 100 * UNIT_SECONDS.a].map(coolingLabel).join(", "),
+    "0 s, 1 s, 8.8 s, 5.3 min, 1.5 h, 3.7 d, 1 a, 100 a", "cooling times read compactly");
+  eq(SHARE_FLOOR, 1, "cells below 1% are blank");
+  // A pulse that ends at shutdown, two cooling steps, and one step before
+  // shutdown that is not a column. Mn56 leads at shutdown and is gone by the
+  // end; Fe55 is there throughout; Mn53 only turns up at the end; Cr51 is
+  // under the floor everywhere and gets no row.
+  const perStep = [
+    { Mn56: 99, Fe55: 1 },
+    { Mn56: 50, Fe55: 40, Cr51: 0.5, Co58: 9.5 },
+    { Mn56: 10, Fe55: 89.5, Cr51: 0.5 },
+    { Fe55: 90, Mn53: 9.95, Cr51: 0.05 },
+  ];
+  const totals = perStep.map((s) => Object.values(s).reduce((n, v) => n + v, 0));
+  const { columns, rows } = shareTable(perStep, totals, [-10, 0, 320, 100 * UNIT_SECONDS.a], 1e-3);
+  eq(columns.map((c) => c.label).join(","), "0 s,5.3 min,100 a", "a column per step at and after shutdown");
+  eq(columns.map((c) => c.total).join(","), "0.1,0.1,0.1", "and the totals in the chosen unit");
+  eq(rows.map((r) => r.name).join(","), "Mn56,Fe55,Co58,Mn53", "rows in the order they first reach the floor, then by share");
+  eq(JSON.stringify(rows[0].shares), JSON.stringify([50, 10, null]), "a nuclide gone below the floor is blank");
+  eq(rows.some((r) => r.name === "Cr51"), false, "and one never above it has no row");
+  eq(shareTable([{}], [0], [0], 1).rows.length, 0, "an empty step makes no rows");
+}
+
 /// Check what gets handed to the solver, out of what came back.
 ///
 /// The fetch answers in whatever order the network does, so this is where a
@@ -1010,6 +1037,7 @@ async function main() {
   checkSpectra();
   checkSchedules();
   checkUnits();
+  checkTables();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
     await checkLive(named.length ? named : ["Li6", "Al27"]);
@@ -1671,6 +1699,40 @@ async function main() {
     await page.selectOption(control("unit"), "Bq");
     await page.waitForTimeout(300);
   }
+
+  // The table toggle swaps the chart for a handbook table in the chosen unit:
+  // a column per step at and after shutdown, the total first, then shares.
+  // In Bq/kg where the vendored solver converts units, else in Bq.
+  const table = '.decay-table[data-for="plot-activity"]';
+  const [tableUnit, tableScale] = converts ? ["Bq/kg", 1 / 7.874] : ["Bq", 1];
+  await page.selectOption(control("unit"), tableUnit);
+  await page.check(control("table"));
+  await page.waitForTimeout(300);
+  const read = await page.$eval(table, (el) => ({
+    shown: !el.hidden && el.previousElementSibling.hidden,
+    head: [...el.querySelectorAll("tr:first-child th")].map((th) => th.textContent),
+    total: [...el.querySelectorAll("tr.total th, tr.total td")].map((c) => c.textContent),
+    rows: [...el.querySelectorAll("tr:not(:first-child):not(.total)")].map((tr) =>
+      [...tr.children].map((c) => c.textContent)),
+  }));
+  eq(read.shown, true, "the table toggle replaces the activity chart with its table");
+  eq(read.head.slice(0, 2).join(" | "), "Activity | 0 s", "headed by the quantity, from shutdown");
+  eq(read.head.length - 1, cooling.length + 1, "with a column per step at and after shutdown");
+  eq(read.total[0], converts ? "Bq/kg" : "Bq, 1000 cm³ / 7.87 kg",
+    "its total row in the chosen unit, saying what a total is for");
+  if (Math.abs(Number(read.total[1]) / (inBq * tableScale) - 1) < 5e-3) ok("whose shutdown value is the chart's");
+  else fail(`the table's shutdown total is ${read.total[1]}, the chart's ${inBq * tableScale}`);
+  const shutdownShares = read.rows.map((r) => Number(r[1]) || 0);
+  if (read.rows.length > 0 && read.rows[0][1] !== "" && shutdownShares.reduce((n, v) => n + v, 0) <= 100.05) {
+    ok(`and ${read.rows.length} nuclide rows, the first leading at shutdown (${read.rows[0][0]} ${read.rows[0][1]}%)`);
+  } else {
+    fail(`the table's rows are ${JSON.stringify(read.rows)}`);
+  }
+  await page.uncheck(control("table"));
+  await page.selectOption(control("unit"), "Bq");
+  await page.waitForTimeout(300);
+  const chartAgain = await page.$eval(table, (el) => el.hidden && !el.previousElementSibling.hidden);
+  eq(chartAgain && (await drawn()).first.total === inBq, true, "and unticked it is the chart again");
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching

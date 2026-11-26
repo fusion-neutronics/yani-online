@@ -217,6 +217,15 @@
   .plot { width: 100%; height: 24rem; }
   .plot-wrap { overflow-x: auto; }
 
+  /* A decay chart as a handbook table: cooling times across, the total in the
+     chosen unit, then each nuclide's percentage of it. */
+  .decay-table { overflow-x: auto; margin-bottom: 1rem; }
+  .share-table { width: auto; min-width: 100%; }
+  .share-table th:first-child { white-space: nowrap; color: var(--ink); }
+  .share-table td.num, .share-table th.num { white-space: nowrap; }
+  .share-table tr:first-child th:first-child { font-weight: 600; }
+  .share-table tr.total td, .share-table tr.total th { font-weight: 600; background: var(--panel); }
+
   /* Scale toggles, one row per chart. Built in plots.js, which owns which
      charts exist and which of their axes the control applies to. Right-aligned
      and small: they are an adjustment to a chart that is already readable, not
