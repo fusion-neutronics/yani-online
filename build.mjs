@@ -83,7 +83,7 @@ async function main() {
   }
   const wheel = localWheel && basename(localWheel);
 
-  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, workerJs, wasm, glue, plotly] = await Promise.all([
+  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, unitsJs, workerJs, wasm, glue, plotly] = await Promise.all([
     read(SRC, "index.html").then(String),
     read(SRC, "app.js").then(String),
     read(SRC, "plots.js").then(String),
@@ -91,19 +91,23 @@ async function main() {
     read(SRC, "ranges.js").then(String),
     read(SRC, "schedules.js").then(String),
     read(SRC, "spectra.js").then(String),
+    read(SRC, "units.js").then(String),
     read(SRC, "worker.js").then(String),
     read(VENDOR, "yani_wasm_bg.wasm"),
     read(VENDOR, "yani_wasm.js").then(String),
     read(VENDOR, "plotly-basic.min.js"),
   ]);
 
-  // plots.js, python.js, ranges.js, schedules.js and spectra.js are imported
-  // by app.js as modules. With everything inlined into one
-  // <script type="module"> there is no module graph left to resolve, so the
-  // imports are dropped and the files concatenated -- app.js last, since it is
-  // the one calling into the others.
-  const app = appJs.replace(/^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra)\.js";\s*$/gm, "");
-  const plots = plotsJs.replace(/^export\s+/gm, "");
+  // plots.js, python.js, ranges.js, schedules.js, spectra.js and units.js are
+  // imported by app.js as modules, and units.js by plots.js too. With
+  // everything inlined into one <script type="module"> there is no module
+  // graph left to resolve, so the imports are dropped and the files
+  // concatenated -- units.js first, since plots.js uses it, and app.js last,
+  // since it is the one calling into the others.
+  const local = /^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra|units)\.js";\s*$/gm;
+  const app = appJs.replace(local, "");
+  const units = unitsJs.replace(/^export\s+/gm, "");
+  const plots = plotsJs.replace(local, "").replace(/^export\s+/gm, "");
   const python = pythonJs.replace(/^export\s+/gm, "");
   const ranges = rangesJs.replace(/^export\s+/gm, "");
   const schedules = schedulesJs.replace(/^export\s+/gm, "");
@@ -118,7 +122,7 @@ async function main() {
     .replace('"__WASM_JS__"', JSON.stringify(glue))
     .replace('"__WORKER_JS__"', JSON.stringify(workerJs))
     .replace('"__PLOTLY_GZ_B64__"', JSON.stringify(b64(plotlyGz)))
-    .replace("__APP_JS__", () => `${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
+    .replace("__APP_JS__", () => `${units}\n${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
 
   // A leftover placeholder means the page would fetch from vendor/ at runtime
   // and silently stop being self-contained, which is the one property the

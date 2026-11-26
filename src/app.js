@@ -11,6 +11,7 @@
 // the parts that would otherwise stop the page dead for the duration.
 
 import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { unitBasis } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, scenarioSchedule } from "./schedules.js";
@@ -130,6 +131,9 @@ const state = {
   // temperature.
   dataKey: null,
   results: null,
+  // The volume and mass density the results' totals are divided by for a
+  // per-volume or per-mass unit, from `unitBasis`, set with the results.
+  resultsBasis: null,
   // A year of irradiation, then ten cooling steps at cumulative times spaced
   // log-evenly from a second to ten years: the "One year, then cooling"
   // scenario, so the default and the button are one definition. Log-spaced
@@ -1027,7 +1031,7 @@ function showResults() {
     slider.value = String(state.results.length - 1);
     $(`${id}-label`).value = state.results.length;
   }
-  drawAll(state.results);
+  drawAll(state.results, state.resultsBasis);
   drawInventory(state.results, state.results.length - 1);
   drawPhotons(state.results, state.results.length - 1);
 }
@@ -1147,6 +1151,10 @@ async function restoreSession(session) {
   state.schedule = setup.schedule.map((step) => ({ ...step }));
   renderSchedule();
 
+  // The form now describes the saved run's material, so the solver can say
+  // what its totals are per, for the unit selects, without solving anything.
+  await applyMaterial(state.solver);
+  state.resultsBasis = unitBasis(await state.solver.materialJson());
   state.results = results;
   showResults();
   refreshSpectrum();
@@ -1164,6 +1172,10 @@ async function run() {
   $("progress").hidden = false;
   try {
     await applyMaterial(state.solver);
+    // What the totals are per, for the unit selects: the material this run
+    // solves, kept with its results rather than read off a form that may
+    // since have moved on.
+    const basis = unitBasis(await state.solver.materialJson());
     await ensureData();
     const spectrum = await currentSpectrum();
     const schedule = await currentSchedule(state.solver);
@@ -1184,6 +1196,7 @@ async function run() {
     } finally {
       clearInterval(tick);
     }
+    state.resultsBasis = basis;
     showResults();
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
@@ -1584,7 +1597,7 @@ async function main() {
     } else if (state.results) {
       if (id === "plot-photons") drawPhotons(state.results, Number($("photon-step").value));
       else if (id === "plot-inventory") drawInventory(state.results, Number($("inventory-step").value));
-      else drawAll(state.results);
+      else drawAll(state.results, state.resultsBasis);
     }
   });
 
@@ -1595,7 +1608,7 @@ async function main() {
     refreshSpectrum();
     drawMaterial(state.material);
     if (state.results) {
-      drawAll(state.results);
+      drawAll(state.results, state.resultsBasis);
       drawInventory(state.results, Number($("inventory-step").value));
       drawPhotons(state.results, Number($("photon-step").value));
     }

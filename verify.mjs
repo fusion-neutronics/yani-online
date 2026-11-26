@@ -32,6 +32,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
+import { UNITS, unitBasis, unitFactor } from "./src/units.js";
 import { SOURCE, SPECTRA } from "./src/spectra.js";
 import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
 import { serve, FETCHED_FIXTURES } from "./serve.mjs";
@@ -607,6 +608,28 @@ function checkSchedules() {
   threw("an unknown scenario", () => scenarioSchedule("ten-years", 1e14));
 }
 
+/// Check the decay charts' unit factors, without a browser: a pure rescale of
+/// the totals by the run's volume and mass density.
+function checkUnits() {
+  const factor = (id, unit, basis) => unitFactor(UNITS[id].find((o) => o.unit === unit), basis);
+  const near = (got, want) => got !== null && Math.abs(got / want - 1) < 1e-12;
+  const iron = unitBasis({ density: 7.874, density_units: "g/cm3", volume: 1000 });
+  eq(JSON.stringify(iron), JSON.stringify({ volume: 1000, massDensity: 7.874 }), "a g/cm3 material's basis");
+  eq(unitBasis({ density: 7874, density_units: "kg/m3", volume: 1000 }).massDensity, 7.874, "kg/m3 is read in g/cm3");
+  eq(factor("plot-activity", "Bq", iron), 1, "Bq is the solver's own");
+  if (near(factor("plot-activity", "Bq/cm3", iron), 1e-3) && near(factor("plot-heat", "W/m3", iron), 1e3)
+      && near(factor("plot-activity", "Bq/g", iron), 1 / 7874) && near(factor("plot-heat", "W/kg", iron), 1 / 7.874)) {
+    ok("per cm3, m3, g and kg divide by the volume and the mass");
+  } else {
+    fail("a per-volume or per-mass factor is wrong");
+  }
+  eq(factor("plot-dose", "µGy/h", iron), 1e6, "the dose rescales only by its prefix");
+  const atoms = unitBasis({ density: 0.08, density_units: "atom/barn-cm", volume: 1000 });
+  eq(factor("plot-activity", "Bq/kg", atoms), null, "no per-mass unit without a mass density");
+  eq(factor("plot-activity", "Bq/m3", atoms), 1e3, "but per volume still");
+  eq(factor("plot-activity", "Bq/cm3", null), null, "and nothing specific without a run's material");
+}
+
 /// Check what gets handed to the solver, out of what came back.
 ///
 /// The fetch answers in whatever order the network does, so this is where a
@@ -954,6 +977,7 @@ async function main() {
   await checkHashes();
   checkSpectra();
   checkSchedules();
+  checkUnits();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
     await checkLive(named.length ? named : ["Li6", "Al27"]);
@@ -1572,6 +1596,25 @@ async function main() {
   await page.check(control("total"));
   await page.waitForTimeout(300);
   eq((await drawn()).names.includes("total") && namedCount(await drawn()) === 4, true, "and the chart comes back as it opened");
+
+  // The unit select rescales what is drawn without a solve: 1000 cm3 of Fe56
+  // at 7.874 g/cm3 is 7.874 kg, so Bq/kg is the total over that, and the axis
+  // says so.
+  const yTitle = () => page.$eval("#plot-activity", (el) => el.layout.yaxis.title.text);
+  eq(await yTitle(), "activity [Bq]", "the activity chart opens in Bq");
+  const inBq = (await drawn()).first.total;
+  await page.selectOption(control("unit"), "Bq/kg");
+  await page.waitForTimeout(300);
+  const inBqPerKg = (await drawn()).first.total;
+  if (Math.abs(inBqPerKg / (inBq / 7.874) - 1) < 1e-12) {
+    ok("Bq/kg is the total over the material's 7.874 kg");
+  } else {
+    fail(`Bq/kg drew ${inBqPerKg} from ${inBq} Bq`);
+  }
+  eq(await yTitle(), "activity [Bq/kg]", "and the axis is titled in it");
+  await page.selectOption(control("unit"), "Bq");
+  await page.waitForTimeout(300);
+  eq((await drawn()).first.total, inBq, "and back in Bq it is the solver's number again");
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching
