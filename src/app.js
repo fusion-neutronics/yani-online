@@ -11,7 +11,7 @@
 // the parts that would otherwise stop the page dead for the duration.
 
 import { chosenUnits, drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
-import { factorTable, wantedFactors } from "./units.js";
+import { amountLabel, factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, scenarioSchedule } from "./schedules.js";
@@ -131,8 +131,9 @@ const state = {
   // temperature.
   dataKey: null,
   results: null,
-  // The factor from the solver's unit to each unit a decay chart offers, for
-  // the material the results are of, from `runUnitFactors`, set with them.
+  // The factor from the solver's unit to each unit a decay chart offers, and
+  // what the totals are for, for the material the results are of, from
+  // `runUnits`, set with them.
   resultsUnits: null,
   // A year of irradiation, then ten cooling steps at cumulative times spaced
   // log-evenly from a second to ten years: the "One year, then cooling"
@@ -814,7 +815,7 @@ async function currentSetup() {
     material,
     spectrum,
     schedule: state.schedule.map((s) => ({ ...s })),
-    units: chosenUnits(),
+    units: chosenUnits(Boolean(state.caps && state.caps.units)),
   };
 }
 
@@ -1156,7 +1157,7 @@ async function restoreSession(session) {
   // The form now describes the saved run's material, so the solver can give
   // the unit selects their factors without solving anything.
   await applyMaterial(state.solver);
-  state.resultsUnits = await runUnitFactors();
+  state.resultsUnits = await runUnits();
   state.results = results;
   showResults();
   refreshSpectrum();
@@ -1167,13 +1168,14 @@ async function restoreSession(session) {
     `${results.length} steps. Run to recompute it, which fetches the data again.`);
 }
 
-/// The factor from the solver's unit to every unit the decay charts offer, for
-/// the material the solver holds now. One round trip for all of them: they are
-/// pure arithmetic on the material, so asking once per run is what lets a unit
-/// change rescale the charts without a solve.
-async function runUnitFactors() {
+/// The factor from the solver's unit to every unit the decay charts offer, and
+/// what a total is for, for the material the solver holds now. One round trip
+/// for all the factors: they are pure arithmetic on the material, so asking
+/// once per run is what lets a unit change rescale the charts without a solve.
+async function runUnits() {
   const wanted = wantedFactors();
-  return factorTable(wanted, await state.solver.unitFactors(wanted));
+  const factors = factorTable(wanted, await state.solver.unitFactors(wanted));
+  return { factors, amount: amountLabel(await state.solver.materialJson()) };
 }
 
 async function run() {
@@ -1186,7 +1188,7 @@ async function run() {
     // The unit selects' factors, for the material this run solves, kept with
     // its results rather than asked of a material the form may since have
     // moved on to.
-    const unitFactors = await runUnitFactors();
+    const unitFactors = await runUnits();
     await ensureData();
     const spectrum = await currentSpectrum();
     const schedule = await currentSchedule(state.solver);

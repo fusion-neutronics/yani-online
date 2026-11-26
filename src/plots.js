@@ -19,7 +19,7 @@
 // rests on colour alone, and the low-contrast hues always carry a visible
 // label.
 
-import { UNITS, unitLabel } from "./units.js";
+import { UNITS, isTotal, unitLabel } from "./units.js";
 
 const SERIES = {
   light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
@@ -185,15 +185,24 @@ const namedOf = (id) => named.get(id) || NAMED_DEFAULT;
 const scales = new Map();
 const scaleOf = (id, axis) => scales.get(`${id}.${axis}`) || "log";
 
-/// The unit each decay chart is read in, as the solver spells it. Opens on the
-/// solver's own, the whole material's Bq and W, and Gy/h.
+/// The unit each decay chart was set to in its select, as the solver spells
+/// it, and the unit it was last drawn in, which is that one or, where the run
+/// cannot give it, the first of the chart's defaults the run can. A chart left
+/// alone opens on its first default.
 const units = new Map();
-const unitOf = (id) => units.get(id) || UNITS[id].native;
+const drawnIn = new Map();
+const unitOf = (id) => units.get(id) || UNITS[id].defaults[0];
 
 /// The decay charts read in a unit other than the solver's own, by id, for the
-/// Python export.
-export const chosenUnits = () => Object.fromEntries(
-  Object.keys(UNITS).filter((id) => unitOf(id) !== UNITS[id].native).map((id) => [id, unitOf(id)]));
+/// Python export, whose methods default to the solver's own. Nothing when the
+/// solver cannot convert units (`converts`), since the page then draws only
+/// its own and a wheel of the same age would refuse `units=`.
+export function chosenUnits(converts) {
+  if (!converts) return {};
+  const unit = (id) => drawnIn.get(id) || unitOf(id);
+  return Object.fromEntries(
+    Object.keys(UNITS).filter((id) => unit(id) !== UNITS[id].native).map((id) => [id, unit(id)]));
+}
 
 /// Plotly positions annotations in the axis's own coordinates, which on a log
 /// axis means log10 of the value. Mixing the two puts a label thousands of
@@ -819,30 +828,37 @@ export function drawMaterial(material) {
   ), CONFIG);
 }
 
-/// The chosen unit of a chart and its factor, from the run's `factors`
-/// (`{ id: { unit: factor } }`, from the solver).
+/// The unit a chart is drawn in, its label and its factor, for `run`: the
+/// run's factors (`{ id: { unit: factor } }`, from the solver) and what its
+/// totals are for (`amountLabel`).
 ///
-/// A unit the solver refused for the run's material, or one a solver too old
-/// to convert units cannot give, is disabled in the chart's unit select, and a
-/// chart left on one falls back to the solver's own unit rather than drawing
-/// nothing.
-function unitFor(id, factors) {
-  const { native } = UNITS[id];
+/// The unit chosen in the chart's select if the run can give it, else the
+/// first of the chart's defaults it can. A unit the solver refused for the
+/// run's material, or one a solver too old to convert units cannot give, is
+/// disabled in the select. A total says what it is the total of, since the
+/// number means nothing without it.
+function unitFor(id, run) {
+  const { native, defaults } = UNITS[id];
+  const factors = run && run.factors;
   const factorOf = (unit) => (unit === native ? 1 : (factors && factors[id] && factors[id][unit]) ?? null);
   const select = document.querySelector(`.axis-scale[data-for="${id}"] select[data-control="unit"]`);
   if (select) for (const el of select.options) el.disabled = factorOf(el.value) === null;
-  let unit = unitOf(id);
-  if (factorOf(unit) === null) {
+  let unit = units.get(id);
+  if (unit !== undefined && factorOf(unit) === null) {
     units.delete(id);
-    unit = native;
+    unit = undefined;
   }
+  unit ??= defaults.find((u) => factorOf(u) !== null) ?? native;
+  drawnIn.set(id, unit);
   if (select) select.value = unit;
-  return { unit: unitLabel(unit), factor: factorOf(unit) };
+  const amount = isTotal(id, unit) && run && run.amount;
+  return { unit: amount ? `${unitLabel(unit)}, ${amount}` : unitLabel(unit), factor: factorOf(unit) };
 }
 
-/// `factors` is the run's unit factors, from `factorTable`.
-export function drawAll(results, factors) {
-  const activity = unitFor("plot-activity", factors);
+/// `run` is the run's unit factors and what its totals are for, from
+/// `runUnits` in app.js.
+export function drawAll(results, run) {
+  const activity = unitFor("plot-activity", run);
   decaySeriesChart(
     document.getElementById("plot-activity"),
     results, "activity_by_nuclide",
@@ -850,7 +866,7 @@ export function drawAll(results, factors) {
     { key: "activity", name: "total" },
     activity.factor,
   );
-  const heat = unitFor("plot-heat", factors);
+  const heat = unitFor("plot-heat", run);
   decaySeriesChart(
     document.getElementById("plot-heat"),
     results, "decay_heat_by_nuclide",
@@ -872,7 +888,7 @@ export function drawAll(results, factors) {
   if (results.some((r) => r.contact_dose !== undefined)) {
     wrap.hidden = false;
     if (bar && bar.classList.contains("axis-scale")) bar.hidden = false;
-    const rate = unitFor("plot-dose", factors);
+    const rate = unitFor("plot-dose", run);
     decaySeriesChart(
       dose, results, "contact_dose_by_nuclide",
       "Contact dose rate", `contact dose [${rate.unit}]`,

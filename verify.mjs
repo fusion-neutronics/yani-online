@@ -32,7 +32,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
-import { UNITS, factorTable, unitLabel, wantedFactors } from "./src/units.js";
+import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
 import { SOURCE, SPECTRA } from "./src/spectra.js";
 import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
@@ -621,6 +621,17 @@ function checkUnits() {
   const table = factorTable(wanted, wanted.map((_, i) => i));
   eq(table["plot-heat"]["W/kg"], wanted.findIndex((w) => w.id === "plot-heat" && w.units === "W/kg"), "answers are filed by chart and unit");
   eq(unitLabel("uGy/h"), "µGy/h", "micro shown as µ");
+  eq(Object.entries(UNITS).map(([id, u]) => `${id}:${u.defaults[0]}`).join(" "),
+    "plot-activity:Bq/kg plot-heat:W/kg plot-dose:Gy/h", "activity and heat open per kg, the dose in Gy/h");
+  eq(Object.entries(UNITS).every(([, u]) => u.defaults.at(-1) === u.native && u.defaults.every((d) => u.offered.includes(d))), true,
+    "and fall back through offered units to the solver's own");
+  eq(["Bq", "TBq", "W", "Bq/kg", "W/cm3"].map((u) => isTotal(u.startsWith("W") ? "plot-heat" : "plot-activity", u)).join(","),
+    "true,true,true,false,false", "Bq, TBq and W are totals, per kg and per cm3 are not");
+  eq(isTotal("plot-dose", "Gy/h"), false, "nor is a dose rate");
+  eq(amountLabel({ name: "Iron", volume: 1000, density: 7.874, density_units: "g/cm3" }), "1000 cm³ / 7.87 kg of Iron",
+    "a total is labelled with the volume, mass and material");
+  eq(amountLabel({ name: null, volume: 1000, density: 7874, density_units: "kg/m3" }), "1000 cm³ / 7.87 kg", "without a name if it has none");
+  eq(amountLabel({ name: null, volume: 2, density: 0.08, density_units: "atom/barn-cm" }), "2 cm³", "and without a mass if it has no mass density");
 
   initSync({ module: readFileSync("vendor/yani_wasm_bg.wasm") });
   if (typeof glue.YaniSession.prototype.totalToUnits !== "function" || typeof glue.convertUnits !== "function") {
@@ -1438,6 +1449,16 @@ async function main() {
   const gateComment = /^# Short of its statistics gate/m.test(fiveScript) === Boolean(SPECTRA["wcll-tf"].shortOfGate);
   eq(fiveSteps === 21 && magnitude && gateComment, true,
     `and the Python export carries its ${fiveSteps} rows and the preset's magnitude, uncertainty and caveat`);
+  // The page opens activity and heat per kg, which the Python API does not
+  // default to, so the script asks for them; a solver that cannot convert
+  // units leaves the page, and so the script, on the totals.
+  const perKg = /activity\(by_nuclide=True, units="Bq\/kg"\)/.test(fiveScript)
+    && /decay_heat\(by_nuclide=True, units="W\/kg"\)/.test(fiveScript);
+  const noUnits = !/units=/.test(fiveScript);
+  eq(typeof glue.convertUnits === "function" ? perKg : noUnits, true,
+    typeof glue.convertUnits === "function"
+      ? 'and asks for units="Bq/kg" and "W/kg", the page\'s defaults'
+      : "and passes no units=, the solver converting none");
   // Back to the default, the way a user would get there: the one-year button,
   // then the rate typed back in.
   await page.click("#scenario-one-year");
@@ -1621,25 +1642,34 @@ async function main() {
   // The unit select rescales what is drawn without a solve: 1000 cm3 of Fe56
   // at 7.874 g/cm3 is 7.874 kg, so Bq/kg is the total over that, and the axis
   // says so.
-  const yTitle = () => page.$eval("#plot-activity", (el) => el.layout.yaxis.title.text);
-  eq(await yTitle(), "activity [Bq]", "the activity chart opens in Bq");
+  // Activity and decay heat open per kg where the vendored solver converts
+  // units, and in its own totals where it does not; a total says what it is
+  // the total of.
+  const yTitle = (id = "plot-activity") => page.$eval(`#${id}`, (el) => el.layout.yaxis.title.text);
+  const converts = typeof glue.convertUnits === "function";
+  const totalTitle = "activity [Bq, 1000 cm³ / 7.87 kg]";
+  eq(await yTitle(), converts ? "activity [Bq/kg]" : totalTitle, `the activity chart opens in ${converts ? "Bq/kg" : "Bq, its fallback"}`);
+  eq(await yTitle("plot-heat"), converts ? "decay heat [W/kg]" : "decay heat [W, 1000 cm³ / 7.87 kg]",
+    `and decay heat in ${converts ? "W/kg" : "W"}`);
+  const openingTotal = (await drawn()).first.total;
+  await page.selectOption(control("unit"), "Bq");
+  await page.waitForTimeout(300);
   const inBq = (await drawn()).first.total;
-  const converts = !(await page.$eval(`${control("unit")} option[value="Bq/kg"]`, (o) => o.disabled));
+  eq(await yTitle(), totalTitle, "a total is labelled with the volume and mass it is for");
   if (!converts) {
-    ok("the vendored solver converts no units, so Bq/kg is offered disabled");
+    eq(await page.$eval(`${control("unit")} option[value="Bq/kg"]`, (o) => o.disabled), true,
+      "the vendored solver converts no units, so Bq/kg is offered disabled");
   } else {
-    await page.selectOption(control("unit"), "Bq/kg");
-    await page.waitForTimeout(300);
-    const inBqPerKg = (await drawn()).first.total;
-    if (Math.abs(inBqPerKg / (inBq / 7.874) - 1) < 1e-9) {
+    if (Math.abs(openingTotal / (inBq / 7.874) - 1) < 1e-9) {
       ok("Bq/kg is the total over the material's 7.874 kg");
     } else {
-      fail(`Bq/kg drew ${inBqPerKg} from ${inBq} Bq`);
+      fail(`Bq/kg drew ${openingTotal} from ${inBq} Bq`);
     }
-    eq(await yTitle(), "activity [Bq/kg]", "and the axis is titled in it");
+    await page.selectOption(control("unit"), "Bq/kg");
+    await page.waitForTimeout(300);
+    eq((await drawn()).first.total, openingTotal, "and back in Bq/kg it is the same number again");
     await page.selectOption(control("unit"), "Bq");
     await page.waitForTimeout(300);
-    eq((await drawn()).first.total, inBq, "and back in Bq it is the solver's number again");
   }
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
@@ -1858,6 +1888,9 @@ async function main() {
   };
   const close = (got, want) => Math.abs(got - want) <= Math.abs(want) * 1e-9;
 
+  // Left on Bq from the unit checks above: these probe the material key
+  // through the total, which the volume scales and per kg would not.
+  eq(await yTitle(), totalTitle, "the probes read the activity as a total");
   const volume = await page.$eval("#volume", (el) => el.value);
   const base = await solve();
 
@@ -1890,6 +1923,10 @@ async function main() {
     () => document.getElementById("status").textContent.startsWith("Restored"), null, { timeout: 60000 },
   ).catch(() => {});
   await scenarioPage.waitForTimeout(500);
+  // The unit selects are not part of a session, as the scale toggles are not,
+  // so the reopened page opens on its defaults: read it in Bq, as the run was.
+  await scenarioPage.selectOption('.axis-scale[data-for="plot-activity"] [data-control="unit"]', "Bq");
+  await scenarioPage.waitForTimeout(300);
   const reopened = await scenarioPage.evaluate(() => ({
     preset: document.getElementById("spectrum-preset").value,
     line: document.getElementById("preset-flux").textContent,

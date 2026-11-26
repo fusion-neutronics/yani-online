@@ -60,6 +60,9 @@ const api = {
   /// any use without the other and they land together (core#527).
   capabilities: () => ({
     requiredMts: typeof session.requiredMts === "function",
+    // Unit conversion, which the unit selects and the Python export's
+    // `units=` need: a solver without it draws only its own units.
+    units: typeof session.totalToUnits === "function" && typeof convertUnits === "function",
   }),
 
   /// The MT numbers the loaded chain names, which is every reaction a run will
