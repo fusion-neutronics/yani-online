@@ -22,10 +22,13 @@ export const UNITS = {
     kind: "total",
     offered: ["W", "kW", "W/cm3", "W/m3", "MW/m3", "W/g", "W/kg"],
   },
+  // Absorbed dose in air only: the browser's run computes no effective dose,
+  // so there are no Sv units to offer. Per year as well as per hour, for a
+  // dose rate read against an annual limit.
   "plot-dose": {
     native: "Gy/h",
     kind: "rate",
-    offered: ["Gy/h", "mGy/h", "uGy/h"],
+    offered: ["Gy/h", "mGy/h", "uGy/h", "mGy/year", "uGy/year"],
   },
 };
 
