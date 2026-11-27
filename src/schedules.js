@@ -77,3 +77,32 @@ export function scenarioSchedule(name, rate) {
   }
   throw new Error(`no schedule called '${name}'`);
 }
+
+/// What a schedule's pulses add up to: the fluence (n/cm2), the time spent
+/// irradiating (s, the pulses only) and the flux averaged over that time.
+///
+/// Fluence is the number to hold against a reference calculation. The
+/// long-lived inventory, Fe55 in iron for one, follows it, so a year at one
+/// flux and two years at another are not the same irradiation however alike
+/// the spectra look; the short-lived inventory follows the flux at shutdown
+/// instead. A row whose rate or duration is not a number counts as nothing.
+export function scheduleFluence(schedule) {
+  let fluence = 0;
+  let seconds = 0;
+  for (const step of schedule) {
+    if (step.kind !== "pulse") continue;
+    const dt = Number(step.value) * (UNIT_SECONDS[step.unit] || NaN);
+    const rate = Number(step.rate);
+    if (!Number.isFinite(dt) || dt <= 0 || !Number.isFinite(rate)) continue;
+    fluence += rate * dt;
+    seconds += dt;
+  }
+  return { fluence, seconds, meanFlux: seconds > 0 ? fluence / seconds : 0 };
+}
+
+/// A duration in seconds as the largest unit it fills, to three figures:
+/// "1 a", "4 a", "36.5 d".
+export function formatDuration(seconds) {
+  const unit = Object.keys(UNIT_SECONDS).reverse().find((u) => seconds >= UNIT_SECONDS[u]) || "s";
+  return `${Number((seconds / UNIT_SECONDS[unit]).toPrecision(3))} ${unit}`;
+}

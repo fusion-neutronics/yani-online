@@ -223,6 +223,8 @@
   .share-table { width: auto; min-width: 100%; }
   .share-table th:first-child { white-space: nowrap; color: var(--ink); }
   .share-table td.num, .share-table th.num { white-space: nowrap; }
+  /* A rule between columns, so a percentage reads against its cooling time. */
+  .share-table th + th, .share-table th + td, .share-table td + td { border-left: 1px solid var(--line); }
   .share-table tr:first-child th:first-child { font-weight: 600; }
   .share-table tr.total td, .share-table tr.total th { font-weight: 600; background: var(--panel); }
 
@@ -567,6 +569,9 @@
         </thead>
         <tbody id="schedule"></tbody>
       </table>
+      <!-- What the pulses add up to, kept up to date as the table is edited:
+           the number to compare with a reference calculation. -->
+      <p class="note" id="schedule-fluence"></p>
       <div class="inline" style="margin-top:.5rem">
         <button class="secondary" id="add-pulse">Add pulse</button>
         <button class="secondary" id="add-cooldown">Add cooldown</button>

@@ -31,7 +31,7 @@ import {
   checkFile, checkParts, latestUrl, parseLatest, parseManifest, sha256Hex, SUPPORTED_FORMAT_VERSIONS,
   wantedParts,
 } from "./src/ranges.js";
-import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
+import { SCENARIOS, UNIT_SECONDS, formatDuration, scenarioSchedule, scheduleFluence } from "./src/schedules.js";
 import { ByteStore, buildByteranges, parseByteranges, parseRange, sharedFetch } from "./src/bytestore.js";
 import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
@@ -691,6 +691,25 @@ function checkSchedules() {
     fail(`the five-year cooling times are ${cumulative.map((t) => t.toExponential(2)).join(", ")} s`);
   }
   threw("an unknown scenario", () => scenarioSchedule("ten-years", 1e14));
+
+  // The fluence line: flux times irradiation time, the pulses only.
+  const yearOne = scheduleFluence(scenarioSchedule("one-year", 3.755e14));
+  eq(Math.abs(yearOne.fluence / (3.755e14 * year) - 1) < 1e-12, true,
+    `a year at 3.755e14 is ${yearOne.fluence.toExponential(3)} n/cm2`);
+  eq(yearOne.meanFlux, 3.755e14, "at its one rate");
+  const fiveYears = scheduleFluence(five);
+  eq(Math.abs(fiveYears.fluence / (4 * rate * year) - 1) < 1e-9 && Math.abs(fiveYears.seconds / (4 * year) - 1) < 1e-9, true,
+    "five years at 80% is four full-power years of fluence, breaks left out");
+  const mixed = scheduleFluence([
+    { kind: "pulse", rate: 1e14, value: 1, unit: "a" },
+    { kind: "cooldown", value: 1, unit: "d" },
+    { kind: "pulse", rate: 3e14, value: 1, unit: "a" },
+  ]);
+  eq(mixed.meanFlux, 2e14, "two pulses average their flux over the time irradiating");
+  eq(JSON.stringify(scheduleFluence([{ kind: "cooldown", value: 1, unit: "d" }])),
+    JSON.stringify({ fluence: 0, seconds: 0, meanFlux: 0 }), "a schedule without pulses has no fluence");
+  eq([formatDuration(year), formatDuration(4 * year), formatDuration(36.5 * 86400)].join(", "), "1 a, 4 a, 36.5 d",
+    "irradiation times read in the largest unit they fill");
 }
 
 /// Check the decay charts' units, without a browser: that the page asks the
@@ -1246,6 +1265,19 @@ async function main() {
   await page.goto(`file://${process.cwd()}/dist/index.html`);
   await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
   ok(`page boots and the solver starts (${Date.now() - bootStarted} ms from file://)`);
+
+  // The fluence under the schedule follows the table as it is edited.
+  const fluenceLine = () => page.textContent("#schedule-fluence");
+  const fluenceBefore = await fluenceLine();
+  eq(/^Fluence \S+ n\/cm2: 1 a of irradiation at \S+ n\/cm2\/s\.$/.test(fluenceBefore), true, `the schedule says its fluence: ${fluenceBefore}`);
+  await page.fill('#schedule input[data-k="value"]', "2");
+  await page.dispatchEvent('#schedule input[data-k="value"]', "input");
+  const doubled = await fluenceLine();
+  const fluenceOf = (text) => Number(text.match(/^Fluence (\S+)/)[1]);
+  eq(Math.abs(fluenceOf(doubled) / fluenceOf(fluenceBefore) - 2) < 0.01 && doubled.includes("2 a of irradiation"), true,
+    `and doubles with the pulse: ${doubled}`);
+  await page.fill('#schedule input[data-k="value"]', "1");
+  await page.dispatchEvent('#schedule input[data-k="value"]', "input");
 
   // The Python tab is not in the one file: from a file it says where it does
   // work, and asks for nothing.

@@ -14,7 +14,7 @@ import { chosenUnits, drawAll, drawInventory, drawMaterial, drawPhotons, drawSpe
 import { amountLabel, factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
-import { SCENARIOS, scenarioSchedule } from "./schedules.js";
+import { SCENARIOS, formatDuration, scenarioSchedule, scheduleFluence } from "./schedules.js";
 import { ByteStore, sharedFetch } from "./bytestore.js";
 import { SOURCE, SPECTRA } from "./spectra.js";
 
@@ -1446,7 +1446,19 @@ function formatRate(rate) {
   return `${Number(mantissa)}e${Number(exponent)}`;
 }
 
+/// The fluence line under the schedule. A mismatch with a reference run
+/// usually shows here first: a year where it irradiated for two, or a preset's
+/// flux where it used its own.
+function refreshFluence() {
+  const { fluence, seconds, meanFlux } = scheduleFluence(state.schedule);
+  $("schedule-fluence").textContent = seconds > 0
+    ? `Fluence ${formatFlux(fluence)} n/cm2: ${formatDuration(seconds)} of irradiation `
+      + `at ${formatFlux(meanFlux)} n/cm2/s${state.schedule.filter((s) => s.kind === "pulse").length > 1 ? " on average" : ""}.`
+    : "No irradiation: the schedule has no pulse with a flux and a duration.";
+}
+
 function renderSchedule() {
+  refreshFluence();
   const body = $("schedule");
   body.innerHTML = "";
   state.schedule.forEach((step, i) => {
@@ -1550,6 +1562,7 @@ async function main() {
     if (s === undefined) return;
     if (k === "unit") {
       state.schedule[s][k] = e.target.value;
+      refreshFluence();
       return;
     }
     // The rate is free text, so it can fail to be a number in a way a number
@@ -1559,6 +1572,7 @@ async function main() {
     const valid = e.target.value.trim() !== "" && Number.isFinite(value) && value >= 0;
     e.target.classList.toggle("invalid", !valid);
     if (valid) state.schedule[s][k] = value;
+    refreshFluence();
   });
   $("schedule").addEventListener("click", (e) => {
     const i = e.target.dataset.removeStep;
