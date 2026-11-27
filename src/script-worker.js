@@ -133,12 +133,14 @@ function fetchBatch(requests) {
 }
 
 /// The wheel's data fetcher: a list of `[url, range]` requests in, one
-/// `[status, body]` per request out. A batch goes to the helper; a single
-/// request, or any request on a page that is not cross-origin isolated, is a
-/// synchronous XMLHttpRequest, which costs no shared memory and no hop.
+/// `[status, body]` per request out. Every request goes to the helper, which
+/// asks the page; only a page that is not cross-origin isolated, with no
+/// helper, makes a synchronous XMLHttpRequest instead.
 function fetchMany(pyRequests) {
   const requests = pyRequests.toJs().map(([url, range]) => [url, range ?? null]);
-  if (requests.length > 1 && canBatch && helper) return fetchBatch(requests);
+  // Single requests too, when the helper is there: it asks the page, which
+  // answers from what the form already downloaded (bytestore.js).
+  if (canBatch && helper) return fetchBatch(requests);
   return requests.map(([url, range]) => fetchSync(url, range));
 }
 self.yaniFetch = fetchMany;
@@ -417,7 +419,7 @@ const handlers = {
       helper = new Worker(new URL("fetcher.js", import.meta.url));
       // The helper reports each request to the page directly: this worker is
       // asleep in Atomics.wait while it works, and could not pass them on.
-      helper.postMessage({ port: fetchPort }, [fetchPort]);
+      helper.postMessage({ port: fetchPort, sharing: true }, [fetchPort]);
     }
     // The wheel downloads while Pyodide does, rather than after it: the two
     // are the bulk of the start-up time and neither needs the other.

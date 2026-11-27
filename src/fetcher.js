@@ -26,12 +26,28 @@ const PUBLISHED_ORIGIN = "https://yamc-data.xsplot.com/";
 const CONCURRENCY = 32;
 
 let page = null;
+// Whether the page answers `get` requests (it does from the shared store on);
+// set by the Python worker when it hands the port over.
+let sharing = false;
+// Requests awaiting the page's answer, by id.
+const pending = new Map();
+let nextId = 0;
+
+/// Ask the page for `url` (or its `range`), as `{ status, body, reused }`.
+function viaPage(url, range, target) {
+  const id = nextId++;
+  return new Promise((resolve) => {
+    pending.set(id, resolve);
+    page.postMessage({ type: "get", id, url, range, target });
+  });
+}
 
 async function answer(i, [url, range], ctl, arena, dataOrigin, alloc) {
   const target = url.startsWith(PUBLISHED_ORIGIN) ? dataOrigin + url.slice(PUBLISHED_ORIGIN.length) : url;
   const started = performance.now();
   let status = 0;
   let body = null;
+  let reused = 0;
   try {
     // The browser's HTTP cache is left on, as for the synchronous path: a file
     // the form already fetched for the same run (the chain, each nuclide's
@@ -39,11 +55,20 @@ async function answer(i, [url, range], ctl, arena, dataOrigin, alloc) {
     // files are immutable, and latest.json, the one object that changes, is
     // asked for with a new release-check query each time, so nothing stale
     // can be served.
-    const response = await fetch(target, { headers: range == null ? {} : { Range: range } });
-    status = response.status;
-    // Only a success carries a body worth handing over, as in the
-    // synchronous path.
-    if (response.ok) body = new Uint8Array(await response.arrayBuffer());
+    if (page && sharing) {
+      // Through the page, which holds what the form and earlier scripts
+      // downloaded and fetches only what it does not (bytestore.js).
+      const got = await viaPage(url, range, target);
+      status = got.status;
+      body = got.body;
+      reused = got.reused;
+    } else {
+      const response = await fetch(target, { headers: range == null ? {} : { Range: range } });
+      status = response.status;
+      // Only a success carries a body worth handing over, as in the
+      // synchronous path.
+      if (response.ok) body = new Uint8Array(await response.arrayBuffer());
+    }
   } catch {
     status = 0;
   }
@@ -66,7 +91,12 @@ async function answer(i, [url, range], ctl, arena, dataOrigin, alloc) {
   ctl[3 + 3 * i] = status === 0 ? 0 : length;
   Atomics.add(ctl, 0, 1);
   Atomics.notify(ctl, 0);
-  if (page) page.postMessage({ type: "fetch", url, range, status, bytes: status === 0 ? 0 : length, ms: performance.now() - started, batched: true });
+  if (page) {
+    // `bytes` is what came over the network, `reused` what the page already
+    // held, so the tab's count of downloaded data stays the download.
+    const fetchedBytes = status === 0 ? 0 : Math.max(0, length - reused);
+    page.postMessage({ type: "fetch", url, range, status, bytes: fetchedBytes, reused, ms: performance.now() - started, batched: true });
+  }
 }
 
 async function batch({ requests, ctl, arena, dataOrigin }) {
@@ -94,6 +124,13 @@ async function batch({ requests, ctl, arena, dataOrigin }) {
 self.onmessage = (event) => {
   if (event.data.port) {
     page = event.data.port;
+    sharing = Boolean(event.data.sharing);
+    page.onmessage = ({ data }) => {
+      if (data.type !== "got") return;
+      const resolve = pending.get(data.id);
+      pending.delete(data.id);
+      if (resolve) resolve({ status: data.status, body: data.body, reused: data.reused || 0 });
+    };
     return;
   }
   batch(event.data);

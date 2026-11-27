@@ -83,12 +83,13 @@ async function main() {
   }
   const wheel = localWheel && basename(localWheel);
 
-  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, unitsJs, tablesJs, workerJs, wasm, glue, plotly] = await Promise.all([
+  const [html, appJs, plotsJs, pythonJs, rangesJs, bytestoreJs, schedulesJs, spectraJs, unitsJs, tablesJs, workerJs, wasm, glue, plotly] = await Promise.all([
     read(SRC, "index.html").then(String),
     read(SRC, "app.js").then(String),
     read(SRC, "plots.js").then(String),
     read(SRC, "python.js").then(String),
     read(SRC, "ranges.js").then(String),
+    read(SRC, "bytestore.js").then(String),
     read(SRC, "schedules.js").then(String),
     read(SRC, "spectra.js").then(String),
     read(SRC, "units.js").then(String),
@@ -99,7 +100,7 @@ async function main() {
     read(VENDOR, "plotly-basic.min.js"),
   ]);
 
-  // plots.js, python.js, ranges.js, schedules.js, spectra.js and units.js are
+  // plots.js, python.js, ranges.js, bytestore.js, schedules.js, spectra.js and units.js are
   // imported by app.js as modules, units.js and tables.js by plots.js, and
   // schedules.js by tables.js. With everything inlined into one
   // <script type="module"> there is no module graph left to resolve, so the
@@ -107,13 +108,14 @@ async function main() {
   // first, since plots.js uses them, and app.js last, since it is the one
   // calling into the others. Every cross-file use is inside a function, so
   // the order only has to hold by the time the page calls in.
-  const local = /^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra|units|tables)\.js";\s*$/gm;
+  const local = /^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|bytestore|schedules|spectra|units|tables)\.js";\s*$/gm;
   const app = appJs.replace(local, "");
   const units = unitsJs.replace(/^export\s+/gm, "");
   const tables = tablesJs.replace(local, "").replace(/^export\s+/gm, "");
   const plots = plotsJs.replace(local, "").replace(/^export\s+/gm, "");
   const python = pythonJs.replace(/^export\s+/gm, "");
   const ranges = rangesJs.replace(/^export\s+/gm, "");
+  const bytestore = bytestoreJs.replace(/^export\s+/gm, "");
   const schedules = schedulesJs.replace(/^export\s+/gm, "");
   const spectra = spectraJs.replace(/^export\s+/gm, "");
 
@@ -126,7 +128,7 @@ async function main() {
     .replace('"__WASM_JS__"', JSON.stringify(glue))
     .replace('"__WORKER_JS__"', JSON.stringify(workerJs))
     .replace('"__PLOTLY_GZ_B64__"', JSON.stringify(b64(plotlyGz)))
-    .replace("__APP_JS__", () => `${units}\n${tables}\n${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
+    .replace("__APP_JS__", () => `${units}\n${tables}\n${plots}\n${python}\n${ranges}\n${bytestore}\n${schedules}\n${spectra}\n${app}`);
 
   // A leftover placeholder means the page would fetch from vendor/ at runtime
   // and silently stop being self-contained, which is the one property the

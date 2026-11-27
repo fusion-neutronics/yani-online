@@ -314,7 +314,7 @@ function clearResults() {
 // Per nuclide (or transmutation subsection) across the session. Reruns read
 // from the in-memory cache and add nothing, so this is what the page holds.
 const fetched = new Map();
-let runFetch = { requests: 0, bytes: 0, batched: 0 };
+let runFetch = { requests: 0, bytes: 0, batched: 0, reused: 0 };
 // The latest "Downloaded 4 of 9 nuclides" line of this run, for the status bar.
 let downloading = null;
 let memory = { heap: 0, held: 0 };
@@ -337,6 +337,7 @@ function recordFetch(f) {
   fetched.set(key, row);
   runFetch.requests += 1;
   runFetch.bytes += f.bytes;
+  runFetch.reused += f.reused || 0;
   if (f.batched) runFetch.batched += 1;
   setStatus(`${downloading || `Fetching ${name}`} (${mb(runFetch.bytes)} so far)`);
   if (!els.root.querySelector('[data-pypanel="data"]').hidden) renderData();
@@ -416,7 +417,19 @@ function startWorker() {
   // The worker's helper reports the requests of a batch on this channel,
   // while the worker itself is blocked waiting for them.
   const fetches = new MessageChannel();
-  fetches.port1.onmessage = (e) => onWorkerMessage(e.data);
+  fetches.port1.onmessage = (e) => {
+    // The helper asks the page for nuclear data, which answers it from what
+    // the form or an earlier script downloaded and fetches only the rest (see
+    // bytestore.js). Copied, not transferred: the store keeps its own.
+    if (e.data.type === "get") {
+      const { id, url, range, target } = e.data;
+      window.yaniSharedFetch(url, range, target).then(
+        (r) => fetches.port1.postMessage({ type: "got", id, status: r.status, body: r.body, reused: r.reused }),
+        () => fetches.port1.postMessage({ type: "got", id, status: 0, body: null, reused: 0 }));
+      return;
+    }
+    onWorkerMessage(e.data);
+  };
   worker.onerror = (e) => {
     appendOutput(`The Python worker failed to start: ${e.message || "unknown error"}`, "stderr");
     setStatus("Python failed to start");
@@ -474,7 +487,8 @@ function onWorkerMessage(msg) {
       clearTimeout(stopTimer);
       memory = msg.memory;
       setState("ready");
-      const fetchedNote = runFetch.requests ? `, fetched ${mb(runFetch.bytes)} of nuclear data` : "";
+      const reusedNote = runFetch.reused ? ` (${mb(runFetch.reused)} more already downloaded this session)` : "";
+      const fetchedNote = runFetch.requests ? `, fetched ${mb(runFetch.bytes)} of nuclear data${reusedNote}` : "";
       setStatus(`${msg.ok ? "Finished" : "Failed"} in ${msg.seconds.toFixed(1)} s${fetchedNote}`);
       // Land on what the run produced: its plots if it drew any and did not
       // fail, otherwise the output, where an error would be.
@@ -516,7 +530,7 @@ function run() {
   if (state !== "ready") return;
   clearResults();
   selectTab("output");
-  runFetch = { requests: 0, bytes: 0, batched: 0 };
+  runFetch = { requests: 0, bytes: 0, batched: 0, reused: 0 };
   downloading = null;
   setState("running");
   setStatus("Running...");
