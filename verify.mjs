@@ -14,7 +14,7 @@
 // spliced at one temperature is byte-for-byte the whole file's bytes; and runs
 // the Python tab's iron example against the published release. It is the only
 // part that needs the network, apart from the Python tab's Pyodide (from its
-// CDN) and yani-core and plotly (from PyPI).
+// CDN) and yani and plotly (from PyPI).
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
@@ -2159,7 +2159,7 @@ async function main() {
 // --- the Python tab --------------------------------------------------------
 
 const PYODIDE_CDN = "https://cdn.jsdelivr.net/";
-// Where yani-core comes from when the page installs the PyPI release, and
+// Where yani comes from when the page installs the PyPI release, and
 // where micropip finds plotly, which Pyodide does not carry.
 const PYPI = ["https://pypi.org/", "https://files.pythonhosted.org/"];
 const RUN_TIMEOUT = 600_000;
@@ -2192,7 +2192,14 @@ async function formRun(browser, base, fill) {
     await page.waitForFunction(() => !document.getElementById("run").disabled
       && /^(Done|$)/.test(document.getElementById("status").textContent), null, { timeout: RUN_TIMEOUT });
     if (!(await page.textContent("#status")).startsWith("Done")) throw new Error(await page.textContent("#warning"));
-    // Drawn in the same task that says Done, so settle before reading.
+    // Drawn in the same task that says Done, so settle before reading. The
+    // charts open per kg; read them in the solver's own units, which is what
+    // the script prints.
+    await page.waitForTimeout(400);
+    for (const [id, unit] of [["plot-activity", "Bq"], ["plot-heat", "W"], ["plot-dose", "Gy/h"]]) {
+      const select = `.axis-scale[data-for="${id}"] select[data-control="unit"]`;
+      if (await page.$(select)) await page.selectOption(select, unit);
+    }
     await page.waitForTimeout(400);
     return await page.evaluate(() => {
       const total = (id) => {
@@ -2267,8 +2274,8 @@ async function checkPythonTab(browser) {
     const booted = await status();
     ok(`the Python tab's first open starts Python in ${openSeconds.toFixed(1)} s: ${booted}`);
     eq(await page.$eval("#form-mode", (el) => el.hidden), true, "and hides the form");
-    if (WHEEL) ok(`installed yani-core from ${WHEEL}, not PyPI`);
-    else eq(booted.includes(`yani ${YANI_CORE_VERSION} `), true, `installed yani-core ${YANI_CORE_VERSION} from PyPI`);
+    if (WHEEL) ok(`installed yani from ${WHEEL}, not PyPI`);
+    else eq(booted.includes(`yani ${YANI_CORE_VERSION} `), true, `installed yani ${YANI_CORE_VERSION} from PyPI`);
     const titles = await app(() => [...document.getElementById("py-example").options].map((o) => o.text));
     eq(titles.join("|"), "Iron activation|Lithium breeding", "the examples menu");
     eq((await app(() => window.yaniScript.code())).startsWith("# Iron activation:"), true, "the editor opens on the iron example");
@@ -2374,7 +2381,10 @@ async function checkPythonTab(browser) {
       if (!manifest.files.some((f) => f.path.startsWith("transmutation/branching.arrow/"))) {
         script = script.replace('yani.transmutation_branch_ratios = "endf-b8.1"', "yani.transmutation_branch_ratios = None");
       }
-      // Every step's totals, at full precision, for the form to be held to.
+      // Every step's totals, at full precision, for the form to be held to, in
+      // the solver's own units (formRun reads the charts in those too). Per kg
+      // the two differ by design, by parts in 1e6: the page divides by the
+      // mass of the material as set, the script by each step's inventory.
       script += "\nfor i, m in enumerate(steps):\n"
         + "    print(f\"step {i} {m.activity()!r} {m.decay_heat()!r} {m.contact_dose()!r}\")\n";
       out = await runCode(script);
@@ -2388,7 +2398,7 @@ async function checkPythonTab(browser) {
 
       // -- The same numbers as the form --------------------------------------
       // The form's own run of the same setup, on the same release. Its totals
-      // come from the vendored yani-wasm and the script's from the yani-core
+      // come from the vendored yani-wasm and the script's from the yani
       // wheel: two builds of the same solver, pinned apart (vendor/CORE_COMMIT
       // and vendor/YANI_CORE_VERSION). On the published release they agree to
       // the last bit or two, so anything past 1e-12 is a disagreement, not
@@ -2496,7 +2506,7 @@ async function checkPythonTab(browser) {
       && !(process.argv.includes("--live") && u.startsWith(`${ORIGIN}/`)));
     eq(foreign.length, 0, `nothing off-origin but Pyodide's CDN and PyPI${foreign.length ? `: ${foreign.slice(0, 5).join(", ")}` : ""}`);
     if (WHEEL) {
-      eq(requests.some((u) => u.startsWith("https://pypi.org/pypi/yani-core/")), false, "and yani-core is not asked of PyPI");
+      eq(requests.some((u) => u.startsWith("https://pypi.org/pypi/yani/")), false, "and yani is not asked of PyPI");
     }
     if (errors.length) fail(`Python tab page errors: ${errors.slice(0, 5).join(" | ")}`);
     else ok("no page errors in the Python tab");

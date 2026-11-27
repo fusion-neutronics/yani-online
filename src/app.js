@@ -1224,7 +1224,7 @@ async function run() {
 // --- the Python tab -------------------------------------------------------
 
 /// script.js, imported the first time the Python tab is opened and never
-/// before: it is what brings CodeMirror, Pyodide and the yani-core wheel, which
+/// before: it is what brings CodeMirror, Pyodide and the yani wheel, which
 /// a visitor using only the form should not wait for or download. It sits
 /// beside the page rather than inside it, so it needs the page served over
 /// http(s); a page opened from a file says so instead.

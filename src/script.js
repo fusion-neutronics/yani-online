@@ -371,7 +371,7 @@ function renderData() {
     parts.push('<p class="empty">Nothing fetched yet.</p>');
   }
   const from = WHEEL ? `from <code>${escapeHtml(WHEEL)}</code>` : "from PyPI";
-  parts.push(`<p class="note">yani-core ${escapeHtml(session.yani || YANI_CORE_VERSION)} ${from},
+  parts.push(`<p class="note">yani ${escapeHtml(session.yani || YANI_CORE_VERSION)} ${from},
     Python ${escapeHtml(session.python || "")}, Pyodide ${escapeHtml(session.pyodide || PYODIDE_VERSION)}.</p>`);
   els.data.innerHTML = parts.join("");
   const clear = $("py-clear-data");

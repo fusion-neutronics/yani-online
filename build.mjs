@@ -10,7 +10,7 @@
 // uncompressed -- it is already LZ4-dense and gzip buys little, while the page
 // would pay to inflate 2.5 MB before it can start.
 //
-//   node build.mjs [--wheel path/to/yani_core-...-pyemscripten_..._wasm32.whl]
+//   node build.mjs [--wheel path/to/yani-...-pyemscripten_..._wasm32.whl]
 //
 // Run `wasm-pack build --target web` in core's crates/yani-wasm and copy
 // pkg/yani_wasm{.js,_bg.wasm} into vendor/ first.
@@ -18,10 +18,10 @@
 // The Python tab is the exception to the one file, and only it: it is loaded
 // the first time the tab is opened, from files beside index.html (its module,
 // its Pyodide worker, the worker's fetch helper, CodeMirror, coi-serviceworker
-// and config.js, which pins Pyodide and yani-core and carries the examples).
-// Pyodide comes from the jsDelivr CDN and yani-core from PyPI, at the versions
+// and config.js, which pins Pyodide and yani and carries the examples).
+// Pyodide comes from the jsDelivr CDN and yani from PyPI, at the versions
 // vendor/PYODIDE_VERSION and vendor/YANI_CORE_VERSION pin. `--wheel` copies a
-// local Pyodide wheel of yani-core into dist/ and installs that instead: for
+// local Pyodide wheel of yani into dist/ and installs that instead: for
 // trying an unreleased core, and for checking the page offline. A published
 // page is built without it.
 
@@ -78,8 +78,8 @@ async function main() {
   const args = process.argv.slice(2);
   const wheelArg = args.indexOf("--wheel");
   const localWheel = wheelArg >= 0 ? resolve(args[wheelArg + 1] || "") : null;
-  if (localWheel && !/^yani_core-.+-pyemscripten_\d+_\d+_wasm32\.whl$/.test(basename(localWheel))) {
-    throw new Error(`--wheel wants a Pyodide wheel of yani-core (yani_core-*-pyemscripten_*_wasm32.whl), not ${localWheel}`);
+  if (localWheel && !/^yani-.+-pyemscripten_\d+_\d+_wasm32\.whl$/.test(basename(localWheel))) {
+    throw new Error(`--wheel wants a Pyodide wheel of yani (yani-*-pyemscripten_*_wasm32.whl), not ${localWheel}`);
   }
   const wheel = localWheel && basename(localWheel);
 
@@ -157,7 +157,7 @@ async function main() {
     `  spectra       ${mb(spectraJs.length)}\n` +
     `Python tab, loaded when first opened: ${mb(tabBytes)} beside the page, ` +
     `Pyodide ${tab.pyodideVersion} from the CDN, ` +
-    `${wheel ? `yani-core from ${wheel} (not PyPI)` : `yani-core ${tab.yaniCoreVersion} from PyPI`}, ` +
+    `${wheel ? `yani from ${wheel} (not PyPI)` : `yani ${tab.yaniCoreVersion} from PyPI`}, ` +
     `${tab.examples.length} examples`,
   );
 }

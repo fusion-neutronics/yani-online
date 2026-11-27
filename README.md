@@ -37,7 +37,7 @@ structures.
 ## Python in the browser
 
 The **Python** tab beside the form is an editor that runs `yani` scripts in
-the page, on [Pyodide](https://pyodide.org): the `yani-core` wheel itself,
+the page, on [Pyodide](https://pyodide.org): the `yani` wheel itself,
 installed from PyPI, so a script there is a script that runs under
 `pip install yani`. It covers what the form does not: loops over materials or
 schedules, custom post-processing, anything the API can do. Figures from
