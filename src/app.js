@@ -345,7 +345,10 @@ async function bootPlotly() {
 /// arrives checked against it whenever what arrived is the whole file: always
 /// for a plain request, and for a ranged one that came back 200. A file that
 /// differs throws whether or not the job is optional. Optional means the file
-/// may be absent, not that it may be wrong.
+/// may be absent, not that it may be wrong, nor that it may fail to arrive:
+/// an optional job whose download failed, after `sharedFetch`'s retries, has
+/// the reason written onto it as `failed`, for the caller to tell apart from a
+/// file the origin does not have.
 /// The nuclear data downloaded this session, shared with the Python tab, which
 /// asks for it through `window.yaniSharedFetch` (see bytestore.js): whichever
 /// of the form and a script runs first downloads, and the other reuses it.
@@ -353,6 +356,20 @@ const dataStore = new ByteStore();
 window.yaniSharedFetch = (url, range, target) => sharedFetch(dataStore, url, range, { target });
 /// Bytes this run's requests were answered from the store, for the status.
 let reusedBytes = 0;
+
+/// Whether a status says the file is not there, as against failing to fetch it.
+const absent = (status) => status === 404 || status === 410;
+
+/// The error for downloads that failed after retrying: `names` say what, and
+/// `jobs` carry the reasons.
+function downloadError(names, jobs) {
+  const shown = names.slice(0, 12).join(", ");
+  const more = names.length > 12 ? `, and ${names.length - 12} more` : "";
+  const reasons = [...new Set(jobs.map((job) => job.failed))].slice(0, 3).join("; ");
+  return new Error(
+    `Could not download ${shown}${more} (${reasons}), after retrying. ` +
+    "What did arrive is kept: Run again to fetch the rest.");
+}
 
 async function fetchAll(jobs, onProgress, limit = 12) {
   let done = 0;
@@ -371,9 +388,12 @@ async function fetchAll(jobs, onProgress, limit = 12) {
           body = resp.body;
         } else if (!job.optional) {
           throw new Error(`${resp.status} ${job.url}`);
+        } else if (!absent(resp.status)) {
+          job.failed = `HTTP ${resp.status}`;
         }
       } catch (e) {
         if (!job.optional) throw e;
+        job.failed = String(e.message || e);
       }
       if (body && (!job.range || job.status === 200)) await checkFile(body, job.entry, job.url);
       results[i] = body || undefined;
@@ -460,6 +480,10 @@ async function loadChain(solver) {
   }
   setStatus("Fetching the transmutation chain…");
   const bytes = await fetchAll(jobs, (f) => { $("progress").value = f; });
+  const failed = jobs.filter((job) => job.failed);
+  if (failed.length) {
+    throw downloadError(failed.map((job) => `the chain's ${job.subsection} ${job.file}`), failed);
+  }
   const sections = [];
   jobs.forEach((job, i) => {
     if (bytes[i]) sections.push({ subsection: job.subsection, file: job.file, bytes: bytes[i] });
@@ -578,9 +602,12 @@ async function loadCrossSections(solver, nuclides) {
     release.files ? nuclides.filter((nuclide) => !entry(nuclide, "version.json")) : []);
   const listed = nuclides.filter((nuclide) => !missing.has(nuclide));
   setStatus(`Checking what ${listed.length} nuclides publish…`);
-  const listedVersions = await fetchAll(
-    listed.map((nuclide) => ({ url: url(nuclide, "version.json"), entry: entry(nuclide, "version.json"), optional: true, nuclide })),
-    (f) => { $("progress").value = f; }, XS_CONCURRENCY);
+  const versionJobs = listed.map((nuclide) => ({ url: url(nuclide, "version.json"), entry: entry(nuclide, "version.json"), optional: true, nuclide }));
+  const listedVersions = await fetchAll(versionJobs, (f) => { $("progress").value = f; }, XS_CONCURRENCY);
+  // Nuclides a download failed for, which are not missing: the release has
+  // them, and the next run asks again.
+  const failedJobs = versionJobs.filter((job) => job.failed);
+  const failed = new Set(failedJobs.map((job) => job.nuclide));
   const byNuclide = new Map(listed.map((nuclide, i) => [nuclide, listedVersions[i]]));
   const versions = nuclides.map((nuclide) => byNuclide.get(nuclide));
 
@@ -593,6 +620,7 @@ async function loadCrossSections(solver, nuclides) {
   // asked for and is worth saying when it is not.
   const temperatures = new Map();
   for (const [i, nuclide] of nuclides.entries()) {
+    if (failed.has(nuclide)) continue;
     if (!versions[i]) {
       // Not published by this library. Nothing else under this directory can
       // exist, so the rest of that nuclide's requests are not made.
@@ -650,8 +678,16 @@ async function loadCrossSections(solver, nuclides) {
   // span belongs to which stream, and what to do with a range that came back as
   // a whole file, are the decisions here whose mistakes are silent.
   const got = await assembleNuclideData(jobs, bytes, plans);
+  for (const job of jobs) {
+    if (!job.failed) continue;
+    failedJobs.push(job);
+    failed.add(job.nuclide);
+  }
+  // A nuclide is handed to the solver whole or not at all, so the run that
+  // fetches the rest of a failed one adds it once.
   items.push(...got.items);
-  for (const nuclide of got.missing) missing.add(nuclide);
+  for (const nuclide of got.missing) if (!failed.has(nuclide)) missing.add(nuclide);
+  const complete = items.filter((item) => !failed.has(item.nuclide));
   if (got.stripped) {
     // A proxy that strips the header strips it from every request, so a plan of
     // several spans downloads the whole file several times. The requests
@@ -660,8 +696,8 @@ async function loadCrossSections(solver, nuclides) {
     state.wantedMts = null;
   }
 
-  const held = await solver.addNuclideData(items);
-  return { held, missing: [...missing], saved: got.saved, checked: got.checked };
+  const held = await solver.addNuclideData(complete);
+  return { held, missing: [...missing], failed: [...failed], failedJobs, saved: got.saved, checked: got.checked };
 }
 
 // --- building the calculation --------------------------------------------
@@ -1004,20 +1040,26 @@ async function ensureData() {
     (wanted.length ? `, ${wanted.length} still to fetch.` : ", all held.");
   if (!wanted.length) return;
 
-  const { held, missing, saved } = await loadCrossSections(state.solver, wanted);
-  for (const n of wanted) state.haveNuclide.add(n);
-  if (missing.length) {
-    // Named, not just counted: which nuclides are missing decides whether the
-    // answer is usable. A gap in a trace activation product is noise; a gap in
-    // something the material is made of is not.
-    const shown = missing.slice(0, 12).join(", ");
-    warn(
-      `No cross sections published for ${missing.length} of ${wanted.length} ` +
-      `nuclides: ${shown}${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
+  const { held, missing, failed, failedJobs, saved } = await loadCrossSections(state.solver, wanted);
+  for (const n of wanted) if (!failed.includes(n)) state.haveNuclide.add(n);
+  // Named, not just counted: which nuclides are missing decides whether the
+  // answer is usable. A gap in a trace activation product is noise; a gap in
+  // something the material is made of is not.
+  const gaps = missing.length
+    ? `No cross sections published for ${missing.length} of ${wanted.length} ` +
+      `nuclides: ${missing.slice(0, 12).join(", ")}${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
       `They react at zero, so anything downstream of them is missing from the ` +
-      `result rather than wrong.`,
-    );
+      `result rather than wrong.`
+    : "";
+  // A download that failed is not a gap in the library: solving without it
+  // would answer as though the nuclide did not react, and differently from the
+  // next run. So the run stops, and the next one fetches what is left.
+  if (failed.length) {
+    const error = downloadError(failed.map((n) => `${n}'s cross sections`), failedJobs);
+    if (gaps) error.message += ` ${gaps}`;
+    throw error;
   }
+  if (gaps) warn(gaps);
   // The saving is worth naming rather than just being fast. It is the whole
   // point of the byte-range index, and it is the difference between a page that
   // can run a closure over a slow connection and one that cannot.

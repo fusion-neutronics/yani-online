@@ -32,7 +32,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, formatDuration, scenarioSchedule, scheduleFluence } from "./src/schedules.js";
-import { ByteStore, buildByteranges, parseByteranges, parseRange, sharedFetch } from "./src/bytestore.js";
+import { ByteStore, buildByteranges, fetchBytes, parseByteranges, parseRange, retryable, sharedFetch } from "./src/bytestore.js";
 import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
 import { SHARE_FLOOR, coolingLabel, shareTable } from "./src/tables.js";
@@ -648,6 +648,40 @@ async function checkByteStore() {
   const r = await sharedFetch(fresh, url, "bytes=5-9", { fetchImpl: stripping });
   eq(r.status === 206 && same(r.body, file.slice(5, 10)) && fresh.whole(url) != null, true,
     "a Range dropped on the way is held as the whole file and still answered as the slice asked for");
+
+  // Failures: an origin that fails the first `n` tries in the given way, then
+  // answers as R2 does. No waiting between tries here.
+  const sleep = async () => {};
+  const flaky = (n, how) => {
+    let tries = 0;
+    const fetchImpl = async (target, init) => {
+      tries++;
+      if (tries <= n) {
+        if (how === "throw") throw new TypeError("Failed to fetch");
+        if (how === "body") return { ok: true, status: 206, arrayBuffer: async () => { throw new TypeError("Failed to fetch"); } };
+        return { ok: false, status: how, arrayBuffer: async () => new ArrayBuffer(0) };
+      }
+      return origin(target, init);
+    };
+    return { fetchImpl, tries: () => tries };
+  };
+  for (const how of ["throw", "body", 503, 429]) {
+    const o = flaky(2, how);
+    const got = await sharedFetch(new ByteStore(), url, "bytes=100-199", { fetchImpl: o.fetchImpl, sleep });
+    eq(got.status === 206 && same(got.body, file.slice(100, 200)) && o.tries() === 3, true,
+      `a request that fails twice (${typeof how === "number" ? `HTTP ${how}` : how === "body" ? "the body cut off" : "no answer"}) is asked again and arrives`);
+  }
+  const gone = flaky(Infinity, 404);
+  const missing = await sharedFetch(new ByteStore(), url, "bytes=100-199", { fetchImpl: gone.fetchImpl, sleep });
+  eq(missing.status === 404 && missing.body === null && gone.tries() === 1, true, "a 404 is an answer, asked once");
+  const down = flaky(Infinity, 503);
+  const failed = await sharedFetch(new ByteStore(), url, "bytes=100-199", { fetchImpl: down.fetchImpl, sleep });
+  eq(failed.status === 503 && failed.body === null && down.tries() === 4, true, "a 503 that persists is given back after four tries");
+  const cut = flaky(Infinity, "body");
+  const thrown = await fetchBytes(cut.fetchImpl, url, {}, { sleep }).then(() => null, (e) => e);
+  eq(thrown instanceof TypeError && cut.tries() === 4, true, "a body cut off every time throws after four tries");
+  eq([0, 408, 429, 500, 503].every(retryable) && ![200, 206, 400, 403, 404, 416].some(retryable), true,
+    "what is retried: no answer, 408, 429 and 5xx");
 }
 
 function checkSchedules() {
@@ -1217,6 +1251,11 @@ async function main() {
   // plainly, so that the edge caches them.
   const pointerQueries = [];
   const queried = [];
+  // The first run loses the first request for every energy.arrow, as a
+  // dropped connection loses requests on the live origin: the page asks again
+  // and the run is none the wiser.
+  let dropping = true;
+  const dropped = new Set();
   const checkPointers = (when) => {
     const busted = pointerQueries.filter((q) => /^\?release-check=[0-9a-f]{16}$/.test(q));
     if (pointerQueries.length && busted.length === pointerQueries.length) {
@@ -1240,6 +1279,11 @@ async function main() {
       // carry, and exercising it is the point: the page has to survive gaps.
       missed++;
       await route.fulfill({ status: 404, body: "" });
+      return;
+    }
+    if (dropping && pathname.endsWith("/energy.arrow") && !dropped.has(pathname)) {
+      dropped.add(pathname);
+      await route.abort("connectionreset");
       return;
     }
     served++;
@@ -1657,6 +1701,12 @@ async function main() {
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+  dropping = false;
+  const afterDrops = await page.textContent("#warning");
+  eq(dropped.size > 0 && !/Could not download/.test(afterDrops)
+    && ![...dropped].some((p) => new RegExp(`published for [^.]*\\b${p.split("/").at(-2).replace(".arrow", "")}\\b`).test(afterDrops)), true,
+    `${dropped.size} dropped energy.arrow request(s) were asked again, and none of their nuclides reported missing`);
+  await checkDownloadFailure(browser);
   // Every file through the release: the pointer, the manifest, and paths
   // under the release folder. Nuclides the manifest does not list are not
   // asked for at all, so the 404s above are what is left after that.
@@ -2348,6 +2398,73 @@ const RUN_TIMEOUT = 600_000;
 /// totals the form draws at every step, which are the solver's own `activity`,
 /// `decay_heat` and `contact_dose`.
 ///
+/// A download that keeps failing stops the run and names the nuclide, rather
+/// than solving as though it did not react, and the next run fetches it.
+async function checkDownloadFailure(browser) {
+  const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+  let failing = true;
+  let asked = 0;
+  await page.route(`${ORIGIN}/**`, async (route) => {
+    const url = route.request().url();
+    if (new URL(url).pathname.endsWith("/neutron/Fe56.arrow/reactions.arrow")) {
+      asked++;
+      if (failing) {
+        await route.fulfill({ status: 503, body: "" });
+        return;
+      }
+    }
+    const found = await fixtureBody(url);
+    if (!found) {
+      await route.fulfill({ status: 404, body: "" });
+      return;
+    }
+    const want = (route.request().headers().range || "").match(/^bytes=(\d+)-(\d+)$/);
+    if (!want) {
+      await route.fulfill({ status: 200, body: found.body });
+      return;
+    }
+    const start = Number(want[1]);
+    const end = Math.min(Number(want[2]), found.body.length - 1);
+    await route.fulfill({
+      status: 206,
+      headers: { "content-range": `bytes ${start}-${end}/${found.body.length}` },
+      body: found.body.subarray(start, end + 1),
+    });
+  });
+  const finished = async () => {
+    await page.waitForTimeout(200);
+    await page.waitForFunction(() => !document.getElementById("run").disabled
+      && /^(Done|$)/.test(document.getElementById("status").textContent), null, { timeout: 300000 });
+  };
+  try {
+    await page.goto(`file://${process.cwd()}/dist/index.html`);
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Ready"), null, { timeout: 30000 });
+    await page.click('[data-tab="custom"]');
+    await page.fill('#composition input[data-k="name"]', "Fe56");
+    await page.fill("#density", "7.874");
+    await page.fill("#volume", "1000");
+    await page.waitForFunction(() => {
+      const el = document.getElementById("plot-material");
+      return el.data && el.data[0].y[0] === "Fe56";
+    }, null, { timeout: 10000 });
+    await page.click("#run");
+    await finished();
+    const warning = await page.textContent("#warning");
+    const stopped = !(await page.textContent("#status")).startsWith("Done");
+    eq(stopped && /^Could not download Fe56's cross sections \(HTTP 503\), after retrying\./.test(warning)
+      && !/published for [^.]*\bFe56\b/.test(warning), true,
+      `a download that keeps failing stops the run and names it: ${warning.slice(0, 110)}`);
+    const before = asked;
+    failing = false;
+    await page.click("#run");
+    await finished();
+    eq((await page.textContent("#status")).startsWith("Done") && asked > before, true,
+      "and Run again fetches it and solves");
+  } finally {
+    await page.close();
+  }
+}
+
 /// Its own context, so its requests to the data origin stay out of the Python
 /// tab's count of what was asked of other origins.
 async function formRun(browser, base, fill) {
