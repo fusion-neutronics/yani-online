@@ -225,6 +225,37 @@ export class ByteStore {
   }
 }
 
+/// Whether a failed answer is worth asking again: the origin, or something on
+/// the way to it, was busy or broken for a moment. A 404 is an answer.
+export const retryable = (status) => status === 0 || status === 408 || status === 429 || status >= 500;
+
+/// The waits before each retry, scaled by a random 0.5 to 1.5 so that requests
+/// which failed together do not all come back at once.
+const BACKOFF_MS = [250, 1000, 3000];
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/// Fetch `target` and read its body, asking again when the request fails, when
+/// the body stops part way (a dropped connection rejects `arrayBuffer()`), or
+/// when the status is `retryable`. A run of a few thousand requests on the
+/// live origin lost a handful this way, in bursts. `{status, ok, body}`, with
+/// the last answer's status when every try failed, and the last error thrown
+/// when none arrived at all.
+export async function fetchBytes(fetchImpl, target, init, { sleep = pause } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt === BACKOFF_MS.length;
+    try {
+      const response = await fetchImpl(target, init);
+      if (response.ok) {
+        return { status: response.status, ok: true, body: new Uint8Array(await response.arrayBuffer()) };
+      }
+      if (last || !retryable(response.status)) return { status: response.status, ok: false, body: null };
+    } catch (e) {
+      if (last) throw e;
+    }
+    await sleep(BACKOFF_MS[attempt] * (0.5 + Math.random()));
+  }
+}
+
 /// The most ranges in one request, as the wheel sends (`MAX_RANGES_PER_REQUEST`
 /// in url_cache.rs): servers cap the header's length.
 const MAX_RANGES = 200;
@@ -238,13 +269,14 @@ const MAX_RANGES = 200;
 /// body, as the network gave it.
 ///
 /// `reused` and `fetched` count the bytes the store answered and the bytes
-/// that came over the network, for the page to report.
-export async function sharedFetch(store, url, range, { target = url, fetchImpl = fetch } = {}) {
+/// that came over the network, for the page to report. Every request goes
+/// through `fetchBytes`, so a failure here is one that retrying did not fix.
+export async function sharedFetch(store, url, range, { target = url, fetchImpl = fetch, sleep } = {}) {
   const ranges = parseRange(range);
+  const get = (headers) => fetchBytes(fetchImpl, target, { headers }, { sleep });
   const direct = async () => {
-    const response = await fetchImpl(target, { headers: range == null ? {} : { Range: range } });
-    const body = response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
-    return { status: response.status, body, reused: 0, fetched: body ? body.length : 0 };
+    const response = await get(range == null ? {} : { Range: range });
+    return { status: response.status, body: response.body, reused: 0, fetched: response.body ? response.body.length : 0 };
   };
   if (!ByteStore.keeps(url) || ranges === undefined) return direct();
 
@@ -260,9 +292,9 @@ export async function sharedFetch(store, url, range, { target = url, fetchImpl =
   const gaps = store.missing(url, ranges);
   for (let i = 0; i < gaps.length; i += MAX_RANGES) {
     const chunk = gaps.slice(i, i + MAX_RANGES);
-    const response = await fetchImpl(target, { headers: { Range: rangeValue(chunk) } });
+    const response = await get({ Range: rangeValue(chunk) });
     if (!response.ok) return { status: response.status, body: null, reused: 0, fetched };
-    const body = new Uint8Array(await response.arrayBuffer());
+    const body = response.body;
     if (response.status === 200) {
       // The Range header was dropped on the way: this is the whole object.
       fetched += body.length;
@@ -275,9 +307,9 @@ export async function sharedFetch(store, url, range, { target = url, fetchImpl =
     if (!parts) {
       // A multi-range request answered some other way: ask a gap at a time.
       for (const gap of chunk) {
-        const one = await fetchImpl(target, { headers: { Range: rangeValue([gap]) } });
+        const one = await get({ Range: rangeValue([gap]) });
         if (!one.ok) return { status: one.status, body: null, reused: 0, fetched };
-        const bytes = new Uint8Array(await one.arrayBuffer());
+        const bytes = one.body;
         fetched += bytes.length;
         if (one.status === 200) {
           store.putWhole(url, bytes.slice());
