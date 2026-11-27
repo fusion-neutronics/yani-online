@@ -61,23 +61,24 @@ so a local `wasm-pack build` produces more than core's CI does (4.92 MB for
 yani-core-0.31.0, 4.62 MB for 0.29.0 and 0.28.0, against 4.61 MB for 0.24.0, 4.51 MB for 0.22.0, 4.35 MB for 0.21.3 and 0.21.1, 4.30 MB for 0.21.0, 2.40 MB for 0.17.0
 and 2.11 MB for 0.11.0; the solver grew).
 fusion-neutronics/core#467 attaches that optimised `pkg/` to every release, so
-re-vendoring means downloading an asset rather than reproducing a toolchain. A
-release of both cores carries both names in its tag
-(`yamc-core-0.24.0,yani-core-0.28.0`), and one of yani-core alone only its own:
+re-vendoring means downloading an asset rather than reproducing a toolchain.
+yani now releases from fusion-neutronics/yamc-and-yani, tagged `yani-<version>`:
 
 ```bash
-gh release download 'yamc-core-0.27.0,yani-core-0.33.0' -R fusion-neutronics/core-archived-nov-26 \
+gh release download yani-0.35.0 -R fusion-neutronics/yamc-and-yani \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../core rev-list -n 1 'yamc-core-0.27.0,yani-core-0.33.0' > vendor/CORE_COMMIT`.
-Releases up to this one live in `fusion-neutronics/core-archived-nov-26`, the
-renamed old core repo.
+`git -C ../yamc-and-yani rev-list -n 1 yani-0.35.0 > vendor/CORE_COMMIT`.
+Releases up to yani-core-0.33.0 live in `fusion-neutronics/core-archived-nov-26`,
+the renamed old core repo, tagged like `yamc-core-0.27.0,yani-core-0.33.0`.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
-is where a changed export or signature would show. From 0.22.0 to 0.33.0 it
+is where a changed export or signature would show. From 0.33.0 to 0.35.0 it
+gained `YaniSession.totalToUnits` and `convertUnits`, which the chart unit
+selects use. From 0.22.0 to 0.33.0 it
 did not change at all (the generated glue, `yani_wasm.js`, is byte-identical
 too), nor from 0.21.3 to 0.22.0. From yani-core-0.18.0 to
 0.21.0 only the doc comments moved: `run()` documents the `photon_continua` and

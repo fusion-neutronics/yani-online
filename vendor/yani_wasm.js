@@ -320,6 +320,9 @@ export class YaniSession {
      * `schedule_json` is an array of `{"dt": seconds, "rate": n/cm^2/s,
      * "spectrum": index}`, where a step with no `spectrum` is decay-only.
      *
+     * Each entry carries a `units` object naming the unit of every quantity
+     * in it (`activity` in Bq, `decay_heat` in W, `contact_dose` in Gy/h, ...).
+     *
      * Returns one entry per step: cumulative time, total activity, decay heat
      * and contact dose rate, each also broken down by nuclide, the atom
      * densities, the decay photon line spectrum, and the photon continua
@@ -360,8 +363,52 @@ export class YaniSession {
             wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
         }
     }
+    /**
+     * The factor that turns a total for the current material, in `native`
+     * units (`"Bq"` for activity, `"W"` for decay heat), into `units`:
+     * scaled (`"TBq"`, `"kW"`), per volume (`"Bq/cm3"`, `"MW/m3"`) or per
+     * mass (`"Bq/kg"`, `"kBq/g"`). The same conversion as the Python API's
+     * `units=`, so a page shows what a script would print.
+     *
+     * Per mass uses the material as set, not each step's inventory, whose
+     * density activation moves by parts in 1e8.
+     * @param {string} native
+     * @param {string} units
+     * @returns {number}
+     */
+    totalToUnits(native, units) {
+        const ptr0 = passStringToWasm0(native, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(units, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.yanisession_totalToUnits(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0];
+    }
 }
 if (Symbol.dispose) YaniSession.prototype[Symbol.dispose] = YaniSession.prototype.free;
+
+/**
+ * The factor from `from` to `to`, two units of the same kind: a contact
+ * dose rate from `"Gy/h"` to `"uGy/h"`, say. The same parser as the Python
+ * API's `units=`.
+ * @param {string} from
+ * @param {string} to
+ * @returns {number}
+ */
+export function convertUnits(from, to) {
+    const ptr0 = passStringToWasm0(from, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(to, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.convertUnits(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
 
 /**
  * Seconds for a `(value, unit)` duration, using the same spellings the Python
