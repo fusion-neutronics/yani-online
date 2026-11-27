@@ -244,19 +244,28 @@ export function cachePersist(name = "yani-online-data") {
   if (typeof caches === "undefined") return null;
   let opened = null;
   const open = () => (opened ??= caches.open(name).catch(() => null));
+  // The keys held, listed once: a fresh page's every range is a miss, and the
+  // form asks thousands, which one lookup each made a fresh run slower.
+  let listed = null;
+  const held = () => (listed ??= open()
+    .then(async (cache) => new Set(cache ? (await cache.keys()).map((request) => request.url) : []))
+    .catch(() => new Set()));
   const key = (url, [first, last]) => `${url}?bytes=${first}-${last}`;
   return {
     async get(url, range) {
       try {
-        const cache = await open();
-        const hit = cache && await cache.match(key(url, range));
+        const k = key(url, range);
+        if (!(await held()).has(k)) return null;
+        const hit = await (await open()).match(k);
         return hit ? new Uint8Array(await hit.arrayBuffer()) : null;
       } catch {
         return null;
       }
     },
     put(url, range, bytes) {
-      open().then((cache) => cache && cache.put(key(url, range), new Response(bytes))).catch(() => {});
+      const k = key(url, range);
+      held().then((keys) => keys.add(k)).catch(() => {});
+      open().then((cache) => cache && cache.put(k, new Response(bytes))).catch(() => {});
     },
   };
 }
