@@ -1,10 +1,10 @@
 // Python and yani, off the main thread, for the Python editor.
 //
 // Adapted from yamc-online's src/worker.js: the same Pyodide start-up, wheel
-// install, data fetcher and script runner, for yani-core rather than
+// install, data fetcher and script runner, for yani rather than
 // yamc-core. A module worker, loaded from its own file next to the page:
 // Pyodide refuses to start in a classic one. Pyodide is imported from the CDN,
-// and yani-core is installed with micropip from its Pyodide wheel on PyPI (or
+// and yani is installed with micropip from its Pyodide wheel on PyPI (or
 // from a local wheel beside the page, for a build made with `--wheel`).
 // A transmutation is one synchronous call into wasm that returns when it is
 // done, so on the main thread it would freeze the page for the whole run; here
@@ -37,7 +37,7 @@ async function getJson(url, missing = null) {
 
 const hex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-/// The yani-core wheel to install, as `{ name, bytes }`: the local wheel the
+/// The yani wheel to install, as `{ name, bytes }`: the local wheel the
 /// page was built with, or else the PyPI release's wheel for this Pyodide.
 ///
 /// Fetched while Pyodide starts, which is why this does not leave it to
@@ -53,12 +53,12 @@ async function fetchWheel({ pyodideBase, pyodideVersion, yaniCore, wheelUrl }) {
   } else {
     const [lock, release] = await Promise.all([
       getJson(`${pyodideBase}pyodide-lock.json`),
-      getJson(`https://pypi.org/pypi/yani-core/${yaniCore}/json`, `yani-core ${yaniCore} is not on PyPI`),
+      getJson(`https://pypi.org/pypi/yani/${yaniCore}/json`, `yani ${yaniCore} is not on PyPI`),
     ]);
     const platform = `pyemscripten_${lock.info.abi_version}_${lock.info.arch}`;
     file = release.urls.find((f) => f.filename.endsWith(`-${platform}.whl`));
     if (!file) {
-      throw new Error(`yani-core ${yaniCore} on PyPI has no wheel for Pyodide ${pyodideVersion} (${platform})`);
+      throw new Error(`yani ${yaniCore} on PyPI has no wheel for Pyodide ${pyodideVersion} (${platform})`);
     }
   }
   const r = await fetch(file.url);
@@ -431,7 +431,7 @@ const handlers = {
     if (interruptBuffer) pyodide.setInterruptBuffer(interruptBuffer);
     post({ type: "status", text: "Installing yani" });
     // micropip installs from the bytes already fetched: it checks the wheel's
-    // tags against this Pyodide and puts it in site-packages. yani-core has no
+    // tags against this Pyodide and puts it in site-packages. yani has no
     // dependencies, so it asks nothing of the network.
     const { name, bytes } = await wheel;
     pyodide.FS.writeFile(`/tmp/${name}`, bytes);

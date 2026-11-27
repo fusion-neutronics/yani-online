@@ -14,7 +14,7 @@
 // spliced at one temperature is byte-for-byte the whole file's bytes; and runs
 // the Python tab's iron example against the published release. It is the only
 // part that needs the network, apart from the Python tab's Pyodide (from its
-// CDN) and yani-core and plotly (from PyPI).
+// CDN) and yani and plotly (from PyPI).
 //
 // Needs `node build.mjs` first, and core's fixtures:
 //   python3 scripts/fetch_test_fixtures.py   (in core)
@@ -32,6 +32,9 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, scenarioSchedule } from "./src/schedules.js";
+import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
+import * as glue from "./vendor/yani_wasm.js";
+import { SHARE_FLOOR, coolingLabel, shareTable } from "./src/tables.js";
 import { SOURCE, SPECTRA } from "./src/spectra.js";
 import { durationToSeconds, initSync } from "./vendor/yani_wasm.js";
 import { serve, FETCHED_FIXTURES } from "./serve.mjs";
@@ -607,6 +610,85 @@ function checkSchedules() {
   threw("an unknown scenario", () => scenarioSchedule("ten-years", 1e14));
 }
 
+/// Check the decay charts' units, without a browser: that the page asks the
+/// solver for a factor per offered unit and files the answers by chart, and,
+/// where the vendored solver converts units, that it accepts every unit
+/// offered and gives the factors a hand calculation does.
+function checkUnits() {
+  const wanted = wantedFactors();
+  const offered = Object.values(UNITS).reduce((n, u) => n + u.offered.length, 0);
+  eq(wanted.length, offered, "a factor asked for per offered unit");
+  eq(Object.entries(UNITS).every(([, u]) => u.offered[0] === u.native), true, "each chart's list opens on the solver's own unit");
+  const table = factorTable(wanted, wanted.map((_, i) => i));
+  eq(table["plot-heat"]["W/kg"], wanted.findIndex((w) => w.id === "plot-heat" && w.units === "W/kg"), "answers are filed by chart and unit");
+  eq(unitLabel("uGy/h"), "µGy/h", "micro shown as µ");
+  eq(Object.entries(UNITS).map(([id, u]) => `${id}:${u.defaults[0]}`).join(" "),
+    "plot-activity:Bq/kg plot-heat:W/kg plot-dose:Gy/h", "activity and heat open per kg, the dose in Gy/h");
+  eq(Object.entries(UNITS).every(([, u]) => u.defaults.at(-1) === u.native && u.defaults.every((d) => u.offered.includes(d))), true,
+    "and fall back through offered units to the solver's own");
+  eq(["Bq", "TBq", "W", "Bq/kg", "W/cm3"].map((u) => isTotal(u.startsWith("W") ? "plot-heat" : "plot-activity", u)).join(","),
+    "true,true,true,false,false", "Bq, TBq and W are totals, per kg and per cm3 are not");
+  eq(isTotal("plot-dose", "Gy/h"), false, "nor is a dose rate");
+  eq(amountLabel({ name: "Iron", volume: 1000, density: 7.874, density_units: "g/cm3" }), "1000 cm³ / 7.87 kg of Iron",
+    "a total is labelled with the volume, mass and material");
+  eq(amountLabel({ name: null, volume: 1000, density: 7874, density_units: "kg/m3" }), "1000 cm³ / 7.87 kg", "without a name if it has none");
+  eq(amountLabel({ name: null, volume: 2, density: 0.08, density_units: "atom/barn-cm" }), "2 cm³", "and without a mass if it has no mass density");
+
+  initSync({ module: readFileSync("vendor/yani_wasm_bg.wasm") });
+  if (typeof glue.YaniSession.prototype.totalToUnits !== "function" || typeof glue.convertUnits !== "function") {
+    console.log("note  the vendored solver predates totalToUnits and convertUnits: the unit selects offer only the solver's own units");
+    return;
+  }
+  const session = new glue.YaniSession();
+  session.pnnlMaterial("Iron", 1000);
+  const factorOf = ({ native, kind, units }) =>
+    (kind === "rate" ? glue.convertUnits(native, units) : session.totalToUnits(native, units));
+  const refused = wanted.filter((w) => {
+    try {
+      return !(factorOf(w) > 0);
+    } catch {
+      return true;
+    }
+  });
+  eq(refused.map((w) => w.units).join(","), "", "the solver gives every offered unit for 1000 cm3 of iron");
+  const near = (got, want) => Math.abs(got / want - 1) < 1e-12;
+  const f = (id, units) => factorOf(wanted.find((w) => w.id === id && w.units === units));
+  if (near(f("plot-activity", "Bq/kg"), 1 / 7.874) && near(f("plot-activity", "Bq/cm3"), 1e-3)
+      && near(f("plot-activity", "Ci"), 1 / 3.7e10) && near(f("plot-heat", "MW/m3"), 1e-3)
+      && near(f("plot-dose", "uGy/h"), 1e6) && near(f("plot-dose", "mGy/a"), 1e3 * 24 * 365.25)) {
+    ok("and the factors a hand calculation gives: Bq/kg, Bq/cm3, Ci, MW/m3, µGy/h, mGy/a");
+  } else {
+    fail("a unit factor from the solver is not the hand calculation's");
+  }
+  session.free();
+}
+
+/// Check the handbook tables the decay charts switch to, without a browser.
+function checkTables() {
+  const day = UNIT_SECONDS.d;
+  eq([0, 1, 8.8, 320, 5400, 3.7 * day, UNIT_SECONDS.a, 100 * UNIT_SECONDS.a].map(coolingLabel).join(", "),
+    "0 s, 1 s, 8.8 s, 5.3 min, 1.5 h, 3.7 d, 1 a, 100 a", "cooling times read compactly");
+  eq(SHARE_FLOOR, 1, "cells below 1% are blank");
+  // A pulse that ends at shutdown, two cooling steps, and one step before
+  // shutdown that is not a column. Mn56 leads at shutdown and is gone by the
+  // end; Fe55 is there throughout; Mn53 only turns up at the end; Cr51 is
+  // under the floor everywhere and gets no row.
+  const perStep = [
+    { Mn56: 99, Fe55: 1 },
+    { Mn56: 50, Fe55: 40, Cr51: 0.5, Co58: 9.5 },
+    { Mn56: 10, Fe55: 89.5, Cr51: 0.5 },
+    { Fe55: 90, Mn53: 9.95, Cr51: 0.05 },
+  ];
+  const totals = perStep.map((s) => Object.values(s).reduce((n, v) => n + v, 0));
+  const { columns, rows } = shareTable(perStep, totals, [-10, 0, 320, 100 * UNIT_SECONDS.a], 1e-3);
+  eq(columns.map((c) => c.label).join(","), "0 s,5.3 min,100 a", "a column per step at and after shutdown");
+  eq(columns.map((c) => c.total).join(","), "0.1,0.1,0.1", "and the totals in the chosen unit");
+  eq(rows.map((r) => r.name).join(","), "Mn56,Fe55,Co58,Mn53", "rows in the order they first reach the floor, then by share");
+  eq(JSON.stringify(rows[0].shares), JSON.stringify([50, 10, null]), "a nuclide gone below the floor is blank");
+  eq(rows.some((r) => r.name === "Cr51"), false, "and one never above it has no row");
+  eq(shareTable([{}], [0], [0], 1).rows.length, 0, "an empty step makes no rows");
+}
+
 /// Check what gets handed to the solver, out of what came back.
 ///
 /// The fetch answers in whatever order the network does, so this is where a
@@ -954,6 +1036,8 @@ async function main() {
   await checkHashes();
   checkSpectra();
   checkSchedules();
+  checkUnits();
+  checkTables();
   if (process.argv.includes("--live")) {
     const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
     await checkLive(named.length ? named : ["Li6", "Al27"]);
@@ -1393,6 +1477,16 @@ async function main() {
   const gateComment = /^# Short of its statistics gate/m.test(fiveScript) === Boolean(SPECTRA["wcll-tf"].shortOfGate);
   eq(fiveSteps === 21 && magnitude && gateComment, true,
     `and the Python export carries its ${fiveSteps} rows and the preset's magnitude, uncertainty and caveat`);
+  // The page opens activity and heat per kg, which the Python API does not
+  // default to, so the script asks for them; a solver that cannot convert
+  // units leaves the page, and so the script, on the totals.
+  const perKg = /activity\(by_nuclide=True, units="Bq\/kg"\)/.test(fiveScript)
+    && /decay_heat\(by_nuclide=True, units="W\/kg"\)/.test(fiveScript);
+  const noUnits = !/units=/.test(fiveScript);
+  eq(typeof glue.convertUnits === "function" ? perKg : noUnits, true,
+    typeof glue.convertUnits === "function"
+      ? 'and asks for units="Bq/kg" and "W/kg", the page\'s defaults'
+      : "and passes no units=, the solver converting none");
   // Back to the default, the way a user would get there: the one-year button,
   // then the rate typed back in.
   await page.click("#scenario-one-year");
@@ -1572,6 +1666,73 @@ async function main() {
   await page.check(control("total"));
   await page.waitForTimeout(300);
   eq((await drawn()).names.includes("total") && namedCount(await drawn()) === 4, true, "and the chart comes back as it opened");
+
+  // The unit select rescales what is drawn without a solve: 1000 cm3 of Fe56
+  // at 7.874 g/cm3 is 7.874 kg, so Bq/kg is the total over that, and the axis
+  // says so.
+  // Activity and decay heat open per kg where the vendored solver converts
+  // units, and in its own totals where it does not; a total says what it is
+  // the total of.
+  const yTitle = (id = "plot-activity") => page.$eval(`#${id}`, (el) => el.layout.yaxis.title.text);
+  const converts = typeof glue.convertUnits === "function";
+  const totalTitle = "activity [Bq, 1000 cm³ / 7.87 kg]";
+  eq(await yTitle(), converts ? "activity [Bq/kg]" : totalTitle, `the activity chart opens in ${converts ? "Bq/kg" : "Bq, its fallback"}`);
+  eq(await yTitle("plot-heat"), converts ? "decay heat [W/kg]" : "decay heat [W, 1000 cm³ / 7.87 kg]",
+    `and decay heat in ${converts ? "W/kg" : "W"}`);
+  const openingTotal = (await drawn()).first.total;
+  await page.selectOption(control("unit"), "Bq");
+  await page.waitForTimeout(300);
+  const inBq = (await drawn()).first.total;
+  eq(await yTitle(), totalTitle, "a total is labelled with the volume and mass it is for");
+  if (!converts) {
+    eq(await page.$eval(`${control("unit")} option[value="Bq/kg"]`, (o) => o.disabled), true,
+      "the vendored solver converts no units, so Bq/kg is offered disabled");
+  } else {
+    if (Math.abs(openingTotal / (inBq / 7.874) - 1) < 1e-9) {
+      ok("Bq/kg is the total over the material's 7.874 kg");
+    } else {
+      fail(`Bq/kg drew ${openingTotal} from ${inBq} Bq`);
+    }
+    await page.selectOption(control("unit"), "Bq/kg");
+    await page.waitForTimeout(300);
+    eq((await drawn()).first.total, openingTotal, "and back in Bq/kg it is the same number again");
+    await page.selectOption(control("unit"), "Bq");
+    await page.waitForTimeout(300);
+  }
+
+  // The table toggle swaps the chart for a handbook table in the chosen unit:
+  // a column per step at and after shutdown, the total first, then shares.
+  // In Bq/kg where the vendored solver converts units, else in Bq.
+  const table = '.decay-table[data-for="plot-activity"]';
+  const [tableUnit, tableScale] = converts ? ["Bq/kg", 1 / 7.874] : ["Bq", 1];
+  await page.selectOption(control("unit"), tableUnit);
+  await page.check(control("table"));
+  await page.waitForTimeout(300);
+  const read = await page.$eval(table, (el) => ({
+    shown: !el.hidden && el.previousElementSibling.hidden,
+    head: [...el.querySelectorAll("tr:first-child th")].map((th) => th.textContent),
+    total: [...el.querySelectorAll("tr.total th, tr.total td")].map((c) => c.textContent),
+    rows: [...el.querySelectorAll("tr:not(:first-child):not(.total)")].map((tr) =>
+      [...tr.children].map((c) => c.textContent)),
+  }));
+  eq(read.shown, true, "the table toggle replaces the activity chart with its table");
+  eq(read.head.slice(0, 2).join(" | "), "Activity | 0 s", "headed by the quantity, from shutdown");
+  eq(read.head.length - 1, cooling.length + 1, "with a column per step at and after shutdown");
+  eq(read.total[0], converts ? "Bq/kg" : "Bq, 1000 cm³ / 7.87 kg",
+    "its total row in the chosen unit, saying what a total is for");
+  if (Math.abs(Number(read.total[1]) / (inBq * tableScale) - 1) < 5e-3) ok("whose shutdown value is the chart's");
+  else fail(`the table's shutdown total is ${read.total[1]}, the chart's ${inBq * tableScale}`);
+  const shutdownShares = read.rows.map((r) => Number(r[1]) || 0);
+  if (read.rows.length > 0 && read.rows[0][1] !== "" && shutdownShares.reduce((n, v) => n + v, 0) <= 100.05) {
+    ok(`and ${read.rows.length} nuclide rows, the first leading at shutdown (${read.rows[0][0]} ${read.rows[0][1]}%)`);
+  } else {
+    fail(`the table's rows are ${JSON.stringify(read.rows)}`);
+  }
+  await page.uncheck(control("table"));
+  await page.selectOption(control("unit"), "Bq");
+  await page.waitForTimeout(300);
+  const chartAgain = await page.$eval(table, (el) => el.hidden && !el.previousElementSibling.hidden);
+  eq(chartAgain && (await drawn()).first.total === inBq, true, "and unticked it is the chart again");
 
   // The decay charts plot time after shutdown, so the ten cooling points of the
   // default schedule spread evenly across the log axis instead of bunching
@@ -1789,6 +1950,9 @@ async function main() {
   };
   const close = (got, want) => Math.abs(got - want) <= Math.abs(want) * 1e-9;
 
+  // Left on Bq from the unit checks above: these probe the material key
+  // through the total, which the volume scales and per kg would not.
+  eq(await yTitle(), totalTitle, "the probes read the activity as a total");
   const volume = await page.$eval("#volume", (el) => el.value);
   const base = await solve();
 
@@ -1821,6 +1985,10 @@ async function main() {
     () => document.getElementById("status").textContent.startsWith("Restored"), null, { timeout: 60000 },
   ).catch(() => {});
   await scenarioPage.waitForTimeout(500);
+  // The unit selects are not part of a session, as the scale toggles are not,
+  // so the reopened page opens on its defaults: read it in Bq, as the run was.
+  await scenarioPage.selectOption('.axis-scale[data-for="plot-activity"] [data-control="unit"]', "Bq");
+  await scenarioPage.waitForTimeout(300);
   const reopened = await scenarioPage.evaluate(() => ({
     preset: document.getElementById("spectrum-preset").value,
     line: document.getElementById("preset-flux").textContent,
@@ -2053,7 +2221,7 @@ async function main() {
 // --- the Python tab --------------------------------------------------------
 
 const PYODIDE_CDN = "https://cdn.jsdelivr.net/";
-// Where yani-core comes from when the page installs the PyPI release, and
+// Where yani comes from when the page installs the PyPI release, and
 // where micropip finds plotly, which Pyodide does not carry.
 const PYPI = ["https://pypi.org/", "https://files.pythonhosted.org/"];
 const RUN_TIMEOUT = 600_000;
@@ -2086,7 +2254,14 @@ async function formRun(browser, base, fill) {
     await page.waitForFunction(() => !document.getElementById("run").disabled
       && /^(Done|$)/.test(document.getElementById("status").textContent), null, { timeout: RUN_TIMEOUT });
     if (!(await page.textContent("#status")).startsWith("Done")) throw new Error(await page.textContent("#warning"));
-    // Drawn in the same task that says Done, so settle before reading.
+    // Drawn in the same task that says Done, so settle before reading. The
+    // charts open per kg; read them in the solver's own units, which is what
+    // the script prints.
+    await page.waitForTimeout(400);
+    for (const [id, unit] of [["plot-activity", "Bq"], ["plot-heat", "W"], ["plot-dose", "Gy/h"]]) {
+      const select = `.axis-scale[data-for="${id}"] select[data-control="unit"]`;
+      if (await page.$(select)) await page.selectOption(select, unit);
+    }
     await page.waitForTimeout(400);
     return await page.evaluate(() => {
       const total = (id) => {
@@ -2161,8 +2336,8 @@ async function checkPythonTab(browser) {
     const booted = await status();
     ok(`the Python tab's first open starts Python in ${openSeconds.toFixed(1)} s: ${booted}`);
     eq(await page.$eval("#form-mode", (el) => el.hidden), true, "and hides the form");
-    if (WHEEL) ok(`installed yani-core from ${WHEEL}, not PyPI`);
-    else eq(booted.includes(`yani ${YANI_CORE_VERSION} `), true, `installed yani-core ${YANI_CORE_VERSION} from PyPI`);
+    if (WHEEL) ok(`installed yani from ${WHEEL}, not PyPI`);
+    else eq(booted.includes(`yani ${YANI_CORE_VERSION} `), true, `installed yani ${YANI_CORE_VERSION} from PyPI`);
     const titles = await app(() => [...document.getElementById("py-example").options].map((o) => o.text));
     eq(titles.join("|"), "Iron activation|Lithium breeding", "the examples menu");
     eq((await app(() => window.yaniScript.code())).startsWith("# Iron activation:"), true, "the editor opens on the iron example");
@@ -2268,7 +2443,10 @@ async function checkPythonTab(browser) {
       if (!manifest.files.some((f) => f.path.startsWith("transmutation/branching.arrow/"))) {
         script = script.replace('yani.transmutation_branch_ratios = "endf-b8.1"', "yani.transmutation_branch_ratios = None");
       }
-      // Every step's totals, at full precision, for the form to be held to.
+      // Every step's totals, at full precision, for the form to be held to, in
+      // the solver's own units (formRun reads the charts in those too). Per kg
+      // the two differ by design, by parts in 1e6: the page divides by the
+      // mass of the material as set, the script by each step's inventory.
       script += "\nfor i, m in enumerate(steps):\n"
         + "    print(f\"step {i} {m.activity()!r} {m.decay_heat()!r} {m.contact_dose()!r}\")\n";
       out = await runCode(script);
@@ -2282,7 +2460,7 @@ async function checkPythonTab(browser) {
 
       // -- The same numbers as the form --------------------------------------
       // The form's own run of the same setup, on the same release. Its totals
-      // come from the vendored yani-wasm and the script's from the yani-core
+      // come from the vendored yani-wasm and the script's from the yani
       // wheel: two builds of the same solver, pinned apart (vendor/CORE_COMMIT
       // and vendor/YANI_CORE_VERSION). On the published release they agree to
       // the last bit or two, so anything past 1e-12 is a disagreement, not
@@ -2390,7 +2568,7 @@ async function checkPythonTab(browser) {
       && !(process.argv.includes("--live") && u.startsWith(`${ORIGIN}/`)));
     eq(foreign.length, 0, `nothing off-origin but Pyodide's CDN and PyPI${foreign.length ? `: ${foreign.slice(0, 5).join(", ")}` : ""}`);
     if (WHEEL) {
-      eq(requests.some((u) => u.startsWith("https://pypi.org/pypi/yani-core/")), false, "and yani-core is not asked of PyPI");
+      eq(requests.some((u) => u.startsWith("https://pypi.org/pypi/yani/")), false, "and yani is not asked of PyPI");
     }
     if (errors.length) fail(`Python tab page errors: ${errors.slice(0, 5).join(" | ")}`);
     else ok("no page errors in the Python tab");

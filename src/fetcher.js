@@ -1,6 +1,6 @@
 // The Python worker's network, for the requests it makes in batches.
 //
-// Copied from yamc-online's src/fetcher.js, which the yani-core wheel's data
+// Copied from yamc-online's src/fetcher.js, which the yani wheel's data
 // fetcher hook shares with yamc-core's: a fix to one belongs in both.
 //
 // The Python worker cannot await anything during a run: the wheel's downloader

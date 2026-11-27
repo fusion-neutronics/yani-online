@@ -10,7 +10,8 @@
 // holds the wasm session, because parsing a chain and solving a network are
 // the parts that would otherwise stop the page dead for the duration.
 
-import { drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { chosenUnits, drawAll, drawInventory, drawMaterial, drawPhotons, drawSpectrum, wireAxisScales } from "./plots.js";
+import { amountLabel, factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, scenarioSchedule } from "./schedules.js";
@@ -130,6 +131,10 @@ const state = {
   // temperature.
   dataKey: null,
   results: null,
+  // The factor from the solver's unit to each unit a decay chart offers, and
+  // what the totals are for, for the material the results are of, from
+  // `runUnits`, set with them.
+  resultsUnits: null,
   // A year of irradiation, then ten cooling steps at cumulative times spaced
   // log-evenly from a second to ten years: the "One year, then cooling"
   // scenario, so the default and the button are one definition. Log-spaced
@@ -227,6 +232,7 @@ class Solver {
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
   materialJson() { return this.call("materialJson"); }
+  unitFactors(wanted) { return this.call("unitFactors", [wanted]); }
   buildMaterial(...args) { return this.call("buildMaterial", args); }
   loadChain() { return this.call("loadChain"); }
   reset() { return this.call("reset"); }
@@ -809,6 +815,7 @@ async function currentSetup() {
     material,
     spectrum,
     schedule: state.schedule.map((s) => ({ ...s })),
+    units: chosenUnits(Boolean(state.caps && state.caps.units)),
   };
 }
 
@@ -1027,7 +1034,7 @@ function showResults() {
     slider.value = String(state.results.length - 1);
     $(`${id}-label`).value = state.results.length;
   }
-  drawAll(state.results);
+  drawAll(state.results, state.resultsUnits);
   drawInventory(state.results, state.results.length - 1);
   drawPhotons(state.results, state.results.length - 1);
 }
@@ -1068,7 +1075,9 @@ async function gzipToB64(text) {
 async function sessionDocument(session) {
   const doc = document.documentElement.cloneNode(true);
   for (const el of doc.querySelectorAll(".plot")) el.replaceChildren();
-  for (const el of doc.querySelectorAll('.axis-scale, #yani-session, style[id^="plotly"]')) el.remove();
+  // A chart shown as its table hides its plot; boot shows charts.
+  for (const el of doc.querySelectorAll(".plot-wrap")) el.hidden = false;
+  for (const el of doc.querySelectorAll('.axis-scale, .decay-table, #yani-session, style[id^="plotly"]')) el.remove();
   doc.querySelector("#results").hidden = true;
   doc.querySelector("#results-empty").hidden = false;
   doc.querySelector("#material-steps").hidden = true;
@@ -1147,6 +1156,10 @@ async function restoreSession(session) {
   state.schedule = setup.schedule.map((step) => ({ ...step }));
   renderSchedule();
 
+  // The form now describes the saved run's material, so the solver can give
+  // the unit selects their factors without solving anything.
+  await applyMaterial(state.solver);
+  state.resultsUnits = await runUnits();
   state.results = results;
   showResults();
   refreshSpectrum();
@@ -1157,6 +1170,16 @@ async function restoreSession(session) {
     `${results.length} steps. Run to recompute it, which fetches the data again.`);
 }
 
+/// The factor from the solver's unit to every unit the decay charts offer, and
+/// what a total is for, for the material the solver holds now. One round trip
+/// for all the factors: they are pure arithmetic on the material, so asking
+/// once per run is what lets a unit change rescale the charts without a solve.
+async function runUnits() {
+  const wanted = wantedFactors();
+  const factors = factorTable(wanted, await state.solver.unitFactors(wanted));
+  return { factors, amount: amountLabel(await state.solver.materialJson()) };
+}
+
 async function run() {
   const btn = $("run");
   btn.disabled = true;
@@ -1164,6 +1187,10 @@ async function run() {
   $("progress").hidden = false;
   try {
     await applyMaterial(state.solver);
+    // The unit selects' factors, for the material this run solves, kept with
+    // its results rather than asked of a material the form may since have
+    // moved on to.
+    const unitFactors = await runUnits();
     await ensureData();
     const spectrum = await currentSpectrum();
     const schedule = await currentSchedule(state.solver);
@@ -1184,6 +1211,7 @@ async function run() {
     } finally {
       clearInterval(tick);
     }
+    state.resultsUnits = unitFactors;
     showResults();
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
   } catch (e) {
@@ -1198,7 +1226,7 @@ async function run() {
 // --- the Python tab -------------------------------------------------------
 
 /// script.js, imported the first time the Python tab is opened and never
-/// before: it is what brings CodeMirror, Pyodide and the yani-core wheel, which
+/// before: it is what brings CodeMirror, Pyodide and the yani wheel, which
 /// a visitor using only the form should not wait for or download. It sits
 /// beside the page rather than inside it, so it needs the page served over
 /// http(s); a page opened from a file says so instead.
@@ -1584,7 +1612,7 @@ async function main() {
     } else if (state.results) {
       if (id === "plot-photons") drawPhotons(state.results, Number($("photon-step").value));
       else if (id === "plot-inventory") drawInventory(state.results, Number($("inventory-step").value));
-      else drawAll(state.results);
+      else drawAll(state.results, state.resultsUnits);
     }
   });
 
@@ -1595,7 +1623,7 @@ async function main() {
     refreshSpectrum();
     drawMaterial(state.material);
     if (state.results) {
-      drawAll(state.results);
+      drawAll(state.results, state.resultsUnits);
       drawInventory(state.results, Number($("inventory-step").value));
       drawPhotons(state.results, Number($("photon-step").value));
     }

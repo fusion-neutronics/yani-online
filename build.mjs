@@ -10,7 +10,7 @@
 // uncompressed -- it is already LZ4-dense and gzip buys little, while the page
 // would pay to inflate 2.5 MB before it can start.
 //
-//   node build.mjs [--wheel path/to/yani_core-...-pyemscripten_..._wasm32.whl]
+//   node build.mjs [--wheel path/to/yani-...-pyemscripten_..._wasm32.whl]
 //
 // Run `wasm-pack build --target web` in core's crates/yani-wasm and copy
 // pkg/yani_wasm{.js,_bg.wasm} into vendor/ first.
@@ -18,10 +18,10 @@
 // The Python tab is the exception to the one file, and only it: it is loaded
 // the first time the tab is opened, from files beside index.html (its module,
 // its Pyodide worker, the worker's fetch helper, CodeMirror, coi-serviceworker
-// and config.js, which pins Pyodide and yani-core and carries the examples).
-// Pyodide comes from the jsDelivr CDN and yani-core from PyPI, at the versions
+// and config.js, which pins Pyodide and yani and carries the examples).
+// Pyodide comes from the jsDelivr CDN and yani from PyPI, at the versions
 // vendor/PYODIDE_VERSION and vendor/YANI_CORE_VERSION pin. `--wheel` copies a
-// local Pyodide wheel of yani-core into dist/ and installs that instead: for
+// local Pyodide wheel of yani into dist/ and installs that instead: for
 // trying an unreleased core, and for checking the page offline. A published
 // page is built without it.
 
@@ -78,12 +78,12 @@ async function main() {
   const args = process.argv.slice(2);
   const wheelArg = args.indexOf("--wheel");
   const localWheel = wheelArg >= 0 ? resolve(args[wheelArg + 1] || "") : null;
-  if (localWheel && !/^yani_core-.+-pyemscripten_\d+_\d+_wasm32\.whl$/.test(basename(localWheel))) {
-    throw new Error(`--wheel wants a Pyodide wheel of yani-core (yani_core-*-pyemscripten_*_wasm32.whl), not ${localWheel}`);
+  if (localWheel && !/^yani-.+-pyemscripten_\d+_\d+_wasm32\.whl$/.test(basename(localWheel))) {
+    throw new Error(`--wheel wants a Pyodide wheel of yani (yani-*-pyemscripten_*_wasm32.whl), not ${localWheel}`);
   }
   const wheel = localWheel && basename(localWheel);
 
-  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, workerJs, wasm, glue, plotly] = await Promise.all([
+  const [html, appJs, plotsJs, pythonJs, rangesJs, schedulesJs, spectraJs, unitsJs, tablesJs, workerJs, wasm, glue, plotly] = await Promise.all([
     read(SRC, "index.html").then(String),
     read(SRC, "app.js").then(String),
     read(SRC, "plots.js").then(String),
@@ -91,19 +91,27 @@ async function main() {
     read(SRC, "ranges.js").then(String),
     read(SRC, "schedules.js").then(String),
     read(SRC, "spectra.js").then(String),
+    read(SRC, "units.js").then(String),
+    read(SRC, "tables.js").then(String),
     read(SRC, "worker.js").then(String),
     read(VENDOR, "yani_wasm_bg.wasm"),
     read(VENDOR, "yani_wasm.js").then(String),
     read(VENDOR, "plotly-basic.min.js"),
   ]);
 
-  // plots.js, python.js, ranges.js, schedules.js and spectra.js are imported
-  // by app.js as modules. With everything inlined into one
+  // plots.js, python.js, ranges.js, schedules.js, spectra.js and units.js are
+  // imported by app.js as modules, units.js and tables.js by plots.js, and
+  // schedules.js by tables.js. With everything inlined into one
   // <script type="module"> there is no module graph left to resolve, so the
-  // imports are dropped and the files concatenated -- app.js last, since it is
-  // the one calling into the others.
-  const app = appJs.replace(/^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra)\.js";\s*$/gm, "");
-  const plots = plotsJs.replace(/^export\s+/gm, "");
+  // imports are dropped and the files concatenated -- units.js and tables.js
+  // first, since plots.js uses them, and app.js last, since it is the one
+  // calling into the others. Every cross-file use is inside a function, so
+  // the order only has to hold by the time the page calls in.
+  const local = /^import\s+\{[^}]*\}\s+from\s+"\.\/(plots|python|ranges|schedules|spectra|units|tables)\.js";\s*$/gm;
+  const app = appJs.replace(local, "");
+  const units = unitsJs.replace(/^export\s+/gm, "");
+  const tables = tablesJs.replace(local, "").replace(/^export\s+/gm, "");
+  const plots = plotsJs.replace(local, "").replace(/^export\s+/gm, "");
   const python = pythonJs.replace(/^export\s+/gm, "");
   const ranges = rangesJs.replace(/^export\s+/gm, "");
   const schedules = schedulesJs.replace(/^export\s+/gm, "");
@@ -118,7 +126,7 @@ async function main() {
     .replace('"__WASM_JS__"', JSON.stringify(glue))
     .replace('"__WORKER_JS__"', JSON.stringify(workerJs))
     .replace('"__PLOTLY_GZ_B64__"', JSON.stringify(b64(plotlyGz)))
-    .replace("__APP_JS__", () => `${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
+    .replace("__APP_JS__", () => `${units}\n${tables}\n${plots}\n${python}\n${ranges}\n${schedules}\n${spectra}\n${app}`);
 
   // A leftover placeholder means the page would fetch from vendor/ at runtime
   // and silently stop being self-contained, which is the one property the
@@ -153,7 +161,7 @@ async function main() {
     `  spectra       ${mb(spectraJs.length)}\n` +
     `Python tab, loaded when first opened: ${mb(tabBytes)} beside the page, ` +
     `Pyodide ${tab.pyodideVersion} from the CDN, ` +
-    `${wheel ? `yani-core from ${wheel} (not PyPI)` : `yani-core ${tab.yaniCoreVersion} from PyPI`}, ` +
+    `${wheel ? `yani from ${wheel} (not PyPI)` : `yani ${tab.yaniCoreVersion} from PyPI`}, ` +
     `${tab.examples.length} examples`,
   );
 }
