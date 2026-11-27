@@ -1701,6 +1701,14 @@ async function main() {
     null, { timeout: 300000 },
   );
   ok(`run fetched and solved (${served} fixture responses, ${missed} 404s survived)`);
+  if (typeof glue.YaniSession.prototype.productScreening === "function") {
+    const budget = await page.textContent("#budget");
+    const counts = budget.match(/^Cross sections for (\d+) of the (\d+) nuclides the chain reaches/);
+    eq(Boolean(counts) && Number(counts[1]) < Number(counts[2]), true,
+      `the run fetched the nuclides its solve reached, not the closure: ${budget}`);
+  } else {
+    console.log("skip  fetching as the solve goes: the vendored solver has no productScreening");
+  }
   dropping = false;
   const afterDrops = await page.textContent("#warning");
   eq(dropped.size > 0 && !/Could not download/.test(afterDrops)

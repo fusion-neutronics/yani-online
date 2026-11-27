@@ -60,6 +60,9 @@ const api = {
   /// any use without the other and they land together (core#527).
   capabilities: () => ({
     requiredMts: typeof session.requiredMts === "function",
+    // The last run's product screening, which lets the page fetch the
+    // nuclides a solve reaches rather than the chain's whole closure.
+    productScreening: typeof session.productScreening === "function",
     // Unit conversion, which the unit selects and the Python export's
     // `units=` need: a solver without it draws only its own units.
     units: typeof session.totalToUnits === "function" && typeof convertUnits === "function",
@@ -70,6 +73,10 @@ const api = {
   /// copy of the chain-kind-to-MT table: an MT a copy of it missed would not
   /// 404, it would be a reaction rate quietly collapsing to zero.
   requiredMts: () => JSON.parse(session.requiredMts()),
+
+  /// What the last run asked cross sections for (`requested`), which of those
+  /// it was not given (`unavailable`), and how many the closure has.
+  productScreening: () => JSON.parse(session.productScreening()),
 
   /// Seconds for each `{ value, unit }` step, from the solver's own table.
   ///
