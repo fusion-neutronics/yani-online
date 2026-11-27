@@ -223,6 +223,8 @@
   .share-table { width: auto; min-width: 100%; }
   .share-table th:first-child { white-space: nowrap; color: var(--ink); }
   .share-table td.num, .share-table th.num { white-space: nowrap; }
+  /* A rule between columns, so a percentage reads against its cooling time. */
+  .share-table th + th, .share-table th + td, .share-table td + td { border-left: 1px solid var(--line); }
   .share-table tr:first-child th:first-child { font-weight: 600; }
   .share-table tr.total td, .share-table tr.total th { font-weight: 600; background: var(--panel); }
 
