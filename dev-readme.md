@@ -38,16 +38,16 @@ fusion-neutronics/core#468; anything vendored before that has it.
 one opaque file, so without it there is no way to tell afterwards which solver a
 given build carries, and a stale copy would look no different from a fresh one.
 
-`dist/index.html` is the result: **one self-contained file**, currently 6.96 MB,
+`dist/index.html` is the result: **one self-contained file**, currently 7.14 MB,
 with the solver, the plotting library and the page inlined. It opens from
 `file://` with no server and no network -- nuclear data is the only thing it
 fetches, and only when a calculation asks for it.
 
 | | |
 | --- | ---: |
-| wasm (base64) | 6.15 MB |
+| wasm (base64) | 6.29 MB |
 | plotly-basic (gzip + base64) | 0.45 MB |
-| page and application code | 0.20 MB |
+| page and application code | 0.22 MB |
 | spectrum presets | 0.16 MB |
 
 `plotly-basic` rather than the full bundle: every chart here is scatter or bar,
@@ -65,18 +65,20 @@ re-vendoring means downloading an asset rather than reproducing a toolchain.
 yani now releases from fusion-neutronics/yamc-and-yani, tagged `yani-<version>`:
 
 ```bash
-gh release download yani-0.35.0 -R fusion-neutronics/yamc-and-yani \
+gh release download yani-0.36.0 -R fusion-neutronics/yamc-and-yani \
   -p 'yani-wasm-*.tar.gz' -O - | tar xz --strip-components=1 -C vendor \
   pkg/yani_wasm.js pkg/yani_wasm_bg.wasm
 ```
 
 Then record which commit it came from, since the asset does not carry it:
-`git -C ../yamc-and-yani rev-list -n 1 yani-0.35.0 > vendor/CORE_COMMIT`.
+`git -C ../yamc-and-yani rev-list -n 1 yani-0.36.0 > vendor/CORE_COMMIT`.
 Releases up to yani-core-0.33.0 live in `fusion-neutronics/core-archived-nov-26`,
 the renamed old core repo, tagged like `yamc-core-0.27.0,yani-core-0.33.0`.
 
 And diff the asset's `pkg/yani_wasm.d.ts` against the previous release's, which
-is where a changed export or signature would show. From 0.33.0 to 0.35.0 it
+is where a changed export or signature would show. From 0.35.0 to 0.36.0 it
+gained `YaniSession.productScreening`, which lets the form fetch the nuclides
+a solve reaches rather than the chain's closure. From 0.33.0 to 0.35.0 it
 gained `YaniSession.totalToUnits` and `convertUnits`, which the chart unit
 selects use. From 0.22.0 to 0.33.0 it
 did not change at all (the generated glue, `yani_wasm.js`, is byte-identical

@@ -246,6 +246,30 @@ export class YaniSession {
         }
     }
     /**
+     * The last run's product screening, as JSON, or `null` before a run.
+     *
+     * `requested` is every nuclide the solve asked cross sections for, and
+     * `unavailable` those of them it was not given. So a host can fetch as the
+     * solve goes rather than the whole closure up front: upload the material's
+     * own nuclides, run, fetch `unavailable`, and run again until a run asks
+     * for nothing it did not ask before. The last run then had every nuclide
+     * it asked for, which is the run that uploading the whole closure gives.
+     * `closure` is that closure's size.
+     * @returns {string}
+     */
+    productScreening() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.yanisession_productScreening(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * The MT numbers the loaded chain names, as a sorted JSON array.
      *
      * Every reaction a run will ask a cross section for, and nothing else. The
@@ -370,8 +394,8 @@ export class YaniSession {
      * mass (`"Bq/kg"`, `"kBq/g"`). The same conversion as the Python API's
      * `units=`, so a page shows what a script would print.
      *
-     * Per mass uses the material as set, not each step's inventory, whose
-     * density activation moves by parts in 1e8.
+     * Per mass is per kg of the material as set, as the Python API's is for
+     * every step of a transmutation.
      * @param {string} native
      * @param {string} units
      * @returns {number}
