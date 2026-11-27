@@ -11,6 +11,10 @@
 // keeps bytes by file and offset rather than by request, and an answer is
 // assembled from whatever spans cover it, fetching only the gaps.
 //
+// The store lasts as long as the page. What outlasts it is `cachePersist`, the
+// ranges fetched kept in the browser's Cache Storage, which `sharedFetch` looks
+// in before going to the network.
+//
 // Pure data and arithmetic around `fetch`, no DOM, so verify.mjs checks it
 // without a browser.
 
@@ -225,6 +229,47 @@ export class ByteStore {
   }
 }
 
+/// The byte ranges fetched, kept across reloads and restarts in the browser's
+/// Cache Storage, one entry per range, or `null` where there is none (a page
+/// opened from a file).
+///
+/// Not the HTTP cache, which is enough for whole files and not for ranges: it
+/// never keeps a multi-range answer, and it keeps a URL's single ranges in one
+/// entry that one request at a time can fill. With the wheel's requests split
+/// into single ranges, iron's Python run after a reload still sent two thirds
+/// of its requests to the network, and took anywhere from 8 s to 159 s. The release's files are
+/// immutable, named by release, so an entry never goes stale; the browser
+/// drops them under storage pressure, which costs only a download again.
+export function cachePersist(name = "yani-online-data") {
+  if (typeof caches === "undefined") return null;
+  let opened = null;
+  const open = () => (opened ??= caches.open(name).catch(() => null));
+  // The keys held, listed once: a fresh page's every range is a miss, and the
+  // form asks thousands, which one lookup each made a fresh run slower.
+  let listed = null;
+  const held = () => (listed ??= open()
+    .then(async (cache) => new Set(cache ? (await cache.keys()).map((request) => request.url) : []))
+    .catch(() => new Set()));
+  const key = (url, [first, last]) => `${url}?bytes=${first}-${last}`;
+  return {
+    async get(url, range) {
+      try {
+        const k = key(url, range);
+        if (!(await held()).has(k)) return null;
+        const hit = await (await open()).match(k);
+        return hit ? new Uint8Array(await hit.arrayBuffer()) : null;
+      } catch {
+        return null;
+      }
+    },
+    put(url, range, bytes) {
+      const k = key(url, range);
+      held().then((keys) => keys.add(k)).catch(() => {});
+      open().then((cache) => cache && cache.put(k, new Response(bytes))).catch(() => {});
+    },
+  };
+}
+
 /// Whether a failed answer is worth asking again: the origin, or something on
 /// the way to it, was busy or broken for a moment. A 404 is an answer.
 export const retryable = (status) => status === 0 || status === 408 || status === 429 || status >= 500;
@@ -268,10 +313,12 @@ const MAX_RANGES = 200;
 /// `multipart/byteranges` body for several. A failure is its status and no
 /// body, as the network gave it.
 ///
-/// `reused` and `fetched` count the bytes the store answered and the bytes
-/// that came over the network, for the page to report. Every request goes
+/// `reused` and `fetched` count the bytes answered without the network and
+/// the bytes that came over it, for the page to report. Every request goes
 /// through `fetchBytes`, so a failure here is one that retrying did not fix.
-export async function sharedFetch(store, url, range, { target = url, fetchImpl = fetch, sleep } = {}) {
+/// With `persist` (see `cachePersist`), ranges not in the store are looked
+/// for there first, and ranges fetched are kept there.
+export async function sharedFetch(store, url, range, { target = url, fetchImpl = fetch, sleep, persist = null } = {}) {
   const ranges = parseRange(range);
   const get = (headers) => fetchBytes(fetchImpl, target, { headers }, { sleep });
   const direct = async () => {
@@ -289,7 +336,17 @@ export async function sharedFetch(store, url, range, { target = url, fetchImpl =
   }
 
   let fetched = 0;
-  const gaps = store.missing(url, ranges);
+  let gaps = store.missing(url, ranges);
+  if (persist && gaps.length) {
+    const kept = await Promise.all(gaps.map((gap) => persist.get(url, gap)));
+    gaps.forEach(([first, last], i) => {
+      if (kept[i] && kept[i].length === last - first + 1) store.putSpan(url, first, kept[i]);
+    });
+    gaps = store.missing(url, ranges);
+  }
+  const keep = (first, bytes) => {
+    if (persist) persist.put(url, [first, first + bytes.length - 1], bytes.slice());
+  };
   for (let i = 0; i < gaps.length; i += MAX_RANGES) {
     const chunk = gaps.slice(i, i + MAX_RANGES);
     const response = await get({ Range: rangeValue(chunk) });
@@ -316,10 +373,14 @@ export async function sharedFetch(store, url, range, { target = url, fetchImpl =
           break;
         }
         store.putSpan(url, gap[0], bytes.slice());
+        keep(gap[0], bytes);
       }
       continue;
     }
-    for (const [first, bytes] of parts) store.putSpan(url, first, bytes.slice());
+    for (const [first, bytes] of parts) {
+      store.putSpan(url, first, bytes.slice());
+      keep(first, bytes);
+    }
   }
 
   const pieces = ranges.map(([a, b]) => [a, store.read(url, a, b)]);

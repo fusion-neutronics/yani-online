@@ -487,7 +487,7 @@ function onWorkerMessage(msg) {
       clearTimeout(stopTimer);
       memory = msg.memory;
       setState("ready");
-      const reusedNote = runFetch.reused ? ` (${mb(runFetch.reused)} more already downloaded this session)` : "";
+      const reusedNote = runFetch.reused ? ` (${mb(runFetch.reused)} more already downloaded)` : "";
       const fetchedNote = runFetch.requests ? `, fetched ${mb(runFetch.bytes)} of nuclear data${reusedNote}` : "";
       setStatus(`${msg.ok ? "Finished" : "Failed"} in ${msg.seconds.toFixed(1)} s${fetchedNote}`);
       // Land on what the run produced: its plots if it drew any and did not
