@@ -104,7 +104,7 @@ const state = {
   // The chain libraries the loaded chain came from, as `chainKey` spells them,
   // or null before the first load. A chain is a property of four dropdowns,
   // and a change to any of them after a run has to start the session over:
-  // see `ensureData`.
+  // see `prepareData`.
   chainKey: null,
   // What the vendored solver can do that an older one could not. Feature
   // detected at boot rather than read off vendor/CORE_COMMIT: the page has to
@@ -230,6 +230,7 @@ class Solver {
   requiredNuclides() { return this.call("requiredNuclides"); }
   capabilities() { return this.call("capabilities"); }
   requiredMts() { return this.call("requiredMts"); }
+  productScreening() { return this.call("productScreening"); }
   durationsToSeconds(steps) { return this.call("durationsToSeconds", [steps]); }
   pnnlMaterial(name, volume) { return this.call("pnnlMaterial", [name, volume]); }
   materialJson() { return this.call("materialJson"); }
@@ -757,7 +758,7 @@ function materialSpec() {
 /// well, though the builder never sees them, for the same reason: the material
 /// holds the sections decoded into it, and a change of either is a change of
 /// what every one of those should say. Rebuilding is what lets go of them, so
-/// that the next solve decodes what `ensureData` fetches in their place rather
+/// that the next solve decodes what the run fetches in their place rather
 /// than reading the cached ones through.
 async function applyMaterial(solver) {
   const spec = materialSpec();
@@ -942,9 +943,16 @@ async function refreshBudget() {
   }
   const required = await state.solver.requiredNuclides();
   if (token !== budgetToken) return;
-  const wanted = required.filter((n) => !heldNuclides().has(n));
-  $("budget").textContent = wanted.length
-    ? `${required.length} nuclides needed, ${wanted.length} still to fetch.`
+  const held = required.filter((n) => heldNuclides().has(n)).length;
+  if (state.caps.productScreening) {
+    $("budget").textContent =
+      `The chain reaches ${required.length} nuclides with cross sections; ` +
+      `a run fetches the ones its solve populates${held ? ` (${held} held)` : ""}.`;
+    return;
+  }
+  const wanted = required.length - held;
+  $("budget").textContent = wanted
+    ? `${required.length} nuclides needed, ${wanted} still to fetch.`
     : `${required.length} nuclides needed, all held.`;
 }
 
@@ -987,16 +995,14 @@ function heldNuclides() {
   return state.dataKey === dataKey() ? state.haveNuclide : new Set();
 }
 
-/// Fetch whatever the current material needs that is not already held.
+/// Make the session ready to take cross sections: the chain parsed, and what is
+/// held matching the library and temperature on the form.
 ///
 /// Called by `run`, not by a button. The data a calculation needs is decided by
 /// its material, so a separate "download" step could only ever be right until
 /// the material changed -- and then it silently was not, which is worse than
-/// slow. Recomputing here means the set can never be stale.
-///
-/// Already-loaded nuclides are skipped, so iterating on a schedule or a
-/// spectrum costs nothing after the first run.
-async function ensureData() {
+/// slow. Deciding it in the run means the set can never be stale.
+async function prepareData() {
   if (state.chainLoaded && state.chainKey !== chainKey()) {
     // A chain library changed since the chain was parsed. The chain could be
     // added again, but a section the new library does not publish would stay
@@ -1033,33 +1039,40 @@ async function ensureData() {
     state.haveNuclide.clear();
     state.dataKey = key;
   }
-  const required = await state.solver.requiredNuclides();
-  const wanted = required.filter((n) => !state.haveNuclide.has(n));
-  $("budget").textContent =
-    `${required.length} nuclides needed` +
-    (wanted.length ? `, ${wanted.length} still to fetch.` : ", all held.");
-  if (!wanted.length) return;
+}
 
+/// The warning for nuclides the release publishes no cross sections for.
+/// Named, not just counted: which nuclides are missing decides whether the
+/// answer is usable. A gap in a trace activation product is noise; a gap in
+/// something the material is made of is not.
+function gapsWarning({ asked, gaps }) {
+  if (!gaps.length) return "";
+  return `No cross sections published for ${gaps.length} of ${asked} ` +
+    `nuclides: ${gaps.slice(0, 12).join(", ")}${gaps.length > 12 ? `, and ${gaps.length - 12} more` : ""}. ` +
+    `They react at zero, so anything downstream of them is missing from the ` +
+    `result rather than wrong.`;
+}
+
+/// Fetch whichever of `nuclides` is not held and hand it to the solver.
+/// Already-held nuclides are skipped, so iterating on a schedule or a spectrum
+/// costs nothing after the first run. `log` gathers, over a run, how many were
+/// asked for and which the release has no cross sections for.
+async function fetchNuclides(nuclides, log) {
+  const wanted = nuclides.filter((n) => !state.haveNuclide.has(n));
+  if (!wanted.length) return;
   const { held, missing, failed, failedJobs, saved } = await loadCrossSections(state.solver, wanted);
   for (const n of wanted) if (!failed.includes(n)) state.haveNuclide.add(n);
-  // Named, not just counted: which nuclides are missing decides whether the
-  // answer is usable. A gap in a trace activation product is noise; a gap in
-  // something the material is made of is not.
-  const gaps = missing.length
-    ? `No cross sections published for ${missing.length} of ${wanted.length} ` +
-      `nuclides: ${missing.slice(0, 12).join(", ")}${missing.length > 12 ? `, and ${missing.length - 12} more` : ""}. ` +
-      `They react at zero, so anything downstream of them is missing from the ` +
-      `result rather than wrong.`
-    : "";
+  log.asked += wanted.length;
+  log.gaps.push(...missing);
   // A download that failed is not a gap in the library: solving without it
   // would answer as though the nuclide did not react, and differently from the
   // next run. So the run stops, and the next one fetches what is left.
   if (failed.length) {
     const error = downloadError(failed.map((n) => `${n}'s cross sections`), failedJobs);
+    const gaps = gapsWarning(log);
     if (gaps) error.message += ` ${gaps}`;
     throw error;
   }
-  if (gaps) warn(gaps);
   // The saving is worth naming rather than just being fast. It is the whole
   // point of the byte-range index, and it is the difference between a page that
   // can run a closure over a slow connection and one that cannot.
@@ -1243,26 +1256,65 @@ async function run() {
     // its results rather than asked of a material the form may since have
     // moved on to.
     const unitFactors = await runUnits();
-    await ensureData();
-    const spectrum = await currentSpectrum();
-    const schedule = await currentSchedule(state.solver);
+    await prepareData();
+    const spectraJson = JSON.stringify([await currentSpectrum()].map((s) => ({ boundaries: s.boundaries, values: s.values })));
+    const scheduleJson = JSON.stringify(await currentSchedule(state.solver));
     // The clock is not decoration. A solve is the one operation with no
     // progress to report -- it is a single call into wasm that returns when it
     // is done -- and a counter that keeps counting is how someone watching can
     // tell the page is alive rather than wedged. It ticks because the solve is
-    // no longer on this thread; before, it could not have.
-    const started = performance.now();
-    const elapsed = () => `${((performance.now() - started) / 1000).toFixed(1)} s`;
-    setStatus("Solving… 0.0 s");
-    const tick = setInterval(() => setStatus(`Solving… ${elapsed()}`), 100);
-    try {
-      state.results = await state.solver.run(
-        JSON.stringify([{ boundaries: spectrum.boundaries, values: spectrum.values }]),
-        JSON.stringify(schedule),
-      );
-    } finally {
-      clearInterval(tick);
+    // no longer on this thread; before, it could not have. It counts solving
+    // only, over every solve of the run.
+    let solving = 0;
+    const elapsed = (since = performance.now()) => `${((solving + performance.now() - since) / 1000).toFixed(1)} s`;
+    const solve = async () => {
+      const started = performance.now();
+      setStatus(`Solving… ${elapsed(started)}`);
+      const tick = setInterval(() => setStatus(`Solving… ${elapsed(started)}`), 100);
+      try {
+        return await state.solver.run(spectraJson, scheduleJson);
+      } finally {
+        clearInterval(tick);
+        solving += performance.now() - started;
+      }
+    };
+    const log = { asked: 0, gaps: [] };
+    if (state.caps.productScreening) {
+      // Fetched as the solve reaches them. The chain's closure is hundreds of
+      // nuclides, hundreds of MB, of which a solve populates a few dozen above
+      // the screening threshold, and only those are read. So the material's
+      // own nuclides are fetched, the solve says which products it asked for
+      // and was not given, and those are fetched and solved again, until it
+      // asks for nothing new. The last solve had all it asked for, which is the
+      // solve fetching the whole closure gives, at a fraction of the download.
+      const reachable = new Set(await state.solver.requiredNuclides());
+      const material = await state.solver.materialJson();
+      let next = Object.keys(material.atoms_per_barn_cm).filter((n) => reachable.has(n));
+      for (;;) {
+        await fetchNuclides(next, log);
+        state.results = await solve();
+        const screening = await state.solver.productScreening();
+        next = (screening ? screening.unavailable : []).filter((n) => !state.haveNuclide.has(n));
+        if (!next.length) {
+          if (screening) {
+            $("budget").textContent =
+              `Cross sections for ${screening.requested.length} of the ${screening.closure} nuclides ` +
+              "the chain reaches: the rest stayed below the solve's screening threshold.";
+          }
+          break;
+        }
+        setStatus(`The solve reached ${next.length} more nuclide${next.length === 1 ? "" : "s"}: fetching…`);
+      }
+    } else {
+      const required = await state.solver.requiredNuclides();
+      const wanted = required.filter((n) => !state.haveNuclide.has(n)).length;
+      $("budget").textContent =
+        `${required.length} nuclides needed` + (wanted ? `, ${wanted} still to fetch.` : ", all held.");
+      await fetchNuclides(required, log);
+      state.results = await solve();
     }
+    const gaps = gapsWarning(log);
+    if (gaps) warn(gaps);
     state.resultsUnits = unitFactors;
     showResults();
     const reused = reusedBytes > 0 ? ` ${(reusedBytes / 1e6).toFixed(1)} MB of data already downloaded this session, not fetched again.` : "";
