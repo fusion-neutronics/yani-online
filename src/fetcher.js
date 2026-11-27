@@ -33,7 +33,13 @@ async function answer(i, [url, range], ctl, arena, dataOrigin, alloc) {
   let status = 0;
   let body = null;
   try {
-    const response = await fetch(target, { headers: range == null ? {} : { Range: range }, cache: "no-store" });
+    // The browser's HTTP cache is left on, as for the synchronous path: a file
+    // the form already fetched for the same run (the chain, each nuclide's
+    // header) is answered from it rather than downloaded again. The release's
+    // files are immutable, and latest.json, the one object that changes, is
+    // asked for with a new release-check query each time, so nothing stale
+    // can be served.
+    const response = await fetch(target, { headers: range == null ? {} : { Range: range } });
     status = response.status;
     // Only a success carries a body worth handing over, as in the
     // synchronous path.
