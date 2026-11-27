@@ -15,6 +15,7 @@ import { amountLabel, factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, formatDuration, scenarioSchedule, scheduleFluence } from "./schedules.js";
+import { ByteStore, sharedFetch } from "./bytestore.js";
 import { SOURCE, SPECTRA } from "./spectra.js";
 
 // --- nuclear data ---------------------------------------------------------
@@ -345,6 +346,14 @@ async function bootPlotly() {
 /// for a plain request, and for a ranged one that came back 200. A file that
 /// differs throws whether or not the job is optional. Optional means the file
 /// may be absent, not that it may be wrong.
+/// The nuclear data downloaded this session, shared with the Python tab, which
+/// asks for it through `window.yaniSharedFetch` (see bytestore.js): whichever
+/// of the form and a script runs first downloads, and the other reuses it.
+const dataStore = new ByteStore();
+window.yaniSharedFetch = (url, range, target) => sharedFetch(dataStore, url, range, { target });
+/// Bytes this run's requests were answered from the store, for the status.
+let reusedBytes = 0;
+
 async function fetchAll(jobs, onProgress, limit = 12) {
   let done = 0;
   let next = 0;
@@ -355,11 +364,11 @@ async function fetchAll(jobs, onProgress, limit = 12) {
       const job = jobs[i];
       let body = null;
       try {
-        const resp = await fetch(
-          job.url, job.range ? { headers: { Range: rangeHeader(job.range) } } : undefined);
+        const resp = await sharedFetch(dataStore, job.url, job.range ? rangeHeader(job.range) : null);
         job.status = resp.status;
-        if (resp.ok) {
-          body = new Uint8Array(await resp.arrayBuffer());
+        reusedBytes += resp.reused;
+        if (resp.body) {
+          body = resp.body;
         } else if (!job.optional) {
           throw new Error(`${resp.status} ${job.url}`);
         }
@@ -1181,6 +1190,7 @@ async function runUnits() {
 }
 
 async function run() {
+  reusedBytes = 0;
   const btn = $("run");
   btn.disabled = true;
   warn("");
@@ -1213,7 +1223,8 @@ async function run() {
     }
     state.resultsUnits = unitFactors;
     showResults();
-    setStatus(`Done in ${elapsed()}. ${state.results.length} steps.`);
+    const reused = reusedBytes > 0 ? ` ${(reusedBytes / 1e6).toFixed(1)} MB of data already downloaded this session, not fetched again.` : "";
+    setStatus(`Done in ${elapsed()}. ${state.results.length} steps.${reused}`);
   } catch (e) {
     warn(String(e.message || e));
     setStatus("");

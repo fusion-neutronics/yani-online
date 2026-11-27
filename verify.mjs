@@ -32,6 +32,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, formatDuration, scenarioSchedule, scheduleFluence } from "./src/schedules.js";
+import { ByteStore, buildByteranges, parseByteranges, parseRange, sharedFetch } from "./src/bytestore.js";
 import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
 import { SHARE_FLOOR, coolingLabel, shareTable } from "./src/tables.js";
@@ -567,6 +568,88 @@ function checkSpectra() {
 /// Check the schedules the page builds and the scenario buttons write, without
 /// a browser, with durations converted by the vendored solver's own
 /// `durationToSeconds`, which is what a run uses.
+/// The download store the form and the Python tab share: what it holds is
+/// answered from it, only the gaps go to the network, and every answer has the
+/// shape a direct fetch would, multi-range bodies included.
+async function checkByteStore() {
+  const file = Uint8Array.from({ length: 5000 }, (_, i) => (i * 7 + 3) % 251);
+  const network = [];
+  // A fake origin that serves `file` as R2 does: 200 whole, 206 for one range,
+  // 206 multipart/byteranges for several.
+  const origin = async (url, { headers = {} } = {}) => {
+    network.push(headers.Range || null);
+    const ranges = parseRange(headers.Range || null);
+    const body = ranges == null ? file
+      : ranges.length === 1 ? file.slice(ranges[0][0], ranges[0][1] + 1)
+      : buildByteranges(ranges.map(([a, b]) => [a, file.slice(a, b + 1)]), "R2BOUNDARY");
+    return { ok: true, status: ranges == null ? 200 : 206, arrayBuffer: async () => body.slice().buffer };
+  };
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  const url = "https://yamc-data.xsplot.com/lib/rel/neutron/Fe56.arrow/reactions.arrow";
+
+  eq(JSON.stringify(parseRange("bytes=64-767,1000-1999")), "[[64,767],[1000,1999]]", "a Range header reads as its spans");
+  eq(parseRange(null), null, "no header is the whole object");
+  const parts = parseByteranges(buildByteranges([[10, file.slice(10, 20)], [300, file.slice(300, 450)]]));
+  eq(parts && parts.length === 2 && parts[0][0] === 10 && same(parts[1][1], file.slice(300, 450)), true,
+    "a multipart/byteranges body built here reads back");
+
+  // The form first: two narrow slices, the way ranges.js asks.
+  const store = new ByteStore();
+  for (const [a, b] of [[100, 199], [1000, 1499]]) {
+    const r = await sharedFetch(store, url, `bytes=${a}-${b}`, { fetchImpl: origin });
+    eq(r.status === 206 && same(r.body, file.slice(a, b + 1)), true, `the form's slice ${a}-${b} arrives as asked`);
+  }
+  // Then the wheel: one wide block around both, and one beyond them, at once.
+  network.length = 0;
+  const wide = await sharedFetch(store, url, "bytes=64-1599,4000-4099", { fetchImpl: origin });
+  eq(JSON.stringify(network), JSON.stringify(["bytes=64-99,200-999,1500-1599,4000-4099"]),
+    "the wheel's wider request asks the network only for the gaps");
+  const answer = parseByteranges(wide.body);
+  eq(wide.status === 206 && answer && answer.length === 2 && same(answer[0][1], file.slice(64, 1600))
+    && same(answer[1][1], file.slice(4000, 4100)), true, "and is answered as one multipart body, in the bytes asked for");
+  eq(wide.reused, 600, "counting the 600 bytes the form had fetched as reused");
+
+  // Again, and from either side: nothing more goes to the network.
+  network.length = 0;
+  const again = await sharedFetch(store, url, "bytes=500-599", { fetchImpl: origin });
+  eq(network.length === 0 && same(again.body, file.slice(500, 600)), true, "a slice inside what is held is not fetched again");
+
+  // Whole files: held once, then answered whole or in slices.
+  const whole = "https://yamc-data.xsplot.com/lib/rel/transmutation/decay.arrow/nuclides.arrow";
+  network.length = 0;
+  await sharedFetch(store, whole, null, { fetchImpl: origin });
+  const second = await sharedFetch(store, whole, null, { fetchImpl: origin });
+  const slice = await sharedFetch(store, whole, "bytes=10-19", { fetchImpl: origin });
+  eq(network.length === 1 && second.status === 200 && same(second.body, file) && slice.status === 206 && same(slice.body, file.slice(10, 20)),
+    true, "a whole file is fetched once, then answered whole or as a slice");
+
+  // latest.json changes: it always goes to the network.
+  network.length = 0;
+  const pointer = "https://yamc-data.xsplot.com/lib/latest.json?release-check=0123";
+  await sharedFetch(store, pointer, null, { fetchImpl: origin });
+  await sharedFetch(store, pointer, null, { fetchImpl: origin });
+  eq(network.length, 2, "a URL with a query (latest.json) is never answered from the store");
+
+  // An answer is a copy: the caller may transfer or change it.
+  const copy = await sharedFetch(store, whole, null, { fetchImpl: origin });
+  copy.body[0] ^= 0xff;
+  eq((await sharedFetch(store, whole, null, { fetchImpl: origin })).body[0], file[0], "and handing out a copy leaves the store as it was");
+
+  // Bounded: past its limit the files held longest are dropped.
+  const small = new ByteStore(3000);
+  small.putWhole("https://x/a", file.slice(0, 2000));
+  small.putWhole("https://x/b", file.slice(0, 2000));
+  eq(small.whole("https://x/a") == null && small.whole("https://x/b") != null && small.size === 2000, true,
+    "past its limit the store drops what it held longest");
+
+  // An origin that drops the Range header answers whole: held as the whole file.
+  const stripping = async () => ({ ok: true, status: 200, arrayBuffer: async () => file.slice().buffer });
+  const fresh = new ByteStore();
+  const r = await sharedFetch(fresh, url, "bytes=5-9", { fetchImpl: stripping });
+  eq(r.status === 206 && same(r.body, file.slice(5, 10)) && fresh.whole(url) != null, true,
+    "a Range dropped on the way is held as the whole file and still answered as the slice asked for");
+}
+
 function checkSchedules() {
   initSync({ module: readFileSync("vendor/yani_wasm_bg.wasm") });
   const seconds = (step) => durationToSeconds(step.value, step.unit);
@@ -1055,6 +1138,7 @@ async function main() {
   await checkHashes();
   checkSpectra();
   checkSchedules();
+  await checkByteStore();
   checkUnits();
   checkTables();
   if (process.argv.includes("--live")) {
