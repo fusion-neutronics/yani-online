@@ -15,7 +15,7 @@ import { amountLabel, factorTable, wantedFactors } from "./units.js";
 import { pythonScript } from "./python.js";
 import { assembleNuclideData, checkFile, latestUrl, parseLatest, parseManifest, planNuclide, rangeHeader } from "./ranges.js";
 import { SCENARIOS, formatDuration, scenarioSchedule, scheduleFluence } from "./schedules.js";
-import { ByteStore, sharedFetch } from "./bytestore.js";
+import { ByteStore, cachePersist, sharedFetch } from "./bytestore.js";
 import { SOURCE, SPECTRA } from "./spectra.js";
 
 // --- nuclear data ---------------------------------------------------------
@@ -354,7 +354,9 @@ async function bootPlotly() {
 /// asks for it through `window.yaniSharedFetch` (see bytestore.js): whichever
 /// of the form and a script runs first downloads, and the other reuses it.
 const dataStore = new ByteStore();
-window.yaniSharedFetch = (url, range, target) => sharedFetch(dataStore, url, range, { target });
+/// And what both downloaded before, kept across reloads (see `cachePersist`).
+const dataPersist = cachePersist();
+window.yaniSharedFetch = (url, range, target) => sharedFetch(dataStore, url, range, { target, persist: dataPersist });
 /// Bytes this run's requests were answered from the store, for the status.
 let reusedBytes = 0;
 
@@ -382,7 +384,7 @@ async function fetchAll(jobs, onProgress, limit = 12) {
       const job = jobs[i];
       let body = null;
       try {
-        const resp = await sharedFetch(dataStore, job.url, job.range ? rangeHeader(job.range) : null);
+        const resp = await sharedFetch(dataStore, job.url, job.range ? rangeHeader(job.range) : null, { persist: dataPersist });
         job.status = resp.status;
         reusedBytes += resp.reused;
         if (resp.body) {
@@ -1317,7 +1319,7 @@ async function run() {
     if (gaps) warn(gaps);
     state.resultsUnits = unitFactors;
     showResults();
-    const reused = reusedBytes > 0 ? ` ${(reusedBytes / 1e6).toFixed(1)} MB of data already downloaded this session, not fetched again.` : "";
+    const reused = reusedBytes > 0 ? ` ${(reusedBytes / 1e6).toFixed(1)} MB of data already downloaded, not fetched again.` : "";
     setStatus(`Done in ${elapsed()}. ${state.results.length} steps.${reused}`);
   } catch (e) {
     warn(String(e.message || e));

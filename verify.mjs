@@ -32,7 +32,7 @@ import {
   wantedParts,
 } from "./src/ranges.js";
 import { SCENARIOS, UNIT_SECONDS, formatDuration, scenarioSchedule, scheduleFluence } from "./src/schedules.js";
-import { ByteStore, buildByteranges, fetchBytes, parseByteranges, parseRange, retryable, sharedFetch } from "./src/bytestore.js";
+import { ByteStore, buildByteranges, cachePersist, fetchBytes, parseByteranges, parseRange, retryable, sharedFetch } from "./src/bytestore.js";
 import { UNITS, amountLabel, factorTable, isTotal, unitLabel, wantedFactors } from "./src/units.js";
 import * as glue from "./vendor/yani_wasm.js";
 import { SHARE_FLOOR, coolingLabel, shareTable } from "./src/tables.js";
@@ -682,6 +682,30 @@ async function checkByteStore() {
   eq(thrown instanceof TypeError && cut.tries() === 4, true, "a body cut off every time throws after four tries");
   eq([0, 408, 429, 500, 503].every(retryable) && ![200, 206, 400, 403, 404, 416].some(retryable), true,
     "what is retried: no answer, 408, 429 and 5xx");
+
+  // Kept across a reload: a fresh store, as a reloaded page has, with the
+  // ranges the last page fetched in a persistent cache, fetches nothing again.
+  const kept = new Map();
+  const persist = {
+    get: async (u, [a, b]) => kept.get(`${u} ${a}-${b}`) || null,
+    put: (u, [a, b], bytes) => kept.set(`${u} ${a}-${b}`, bytes),
+  };
+  network.length = 0;
+  const first = await sharedFetch(new ByteStore(), url, "bytes=64-1599,4000-4099", { fetchImpl: origin, persist });
+  eq(network.length === 1 && kept.size === 2, true, "ranges fetched are kept, one entry each");
+  network.length = 0;
+  const reloaded = await sharedFetch(new ByteStore(), url, "bytes=64-1599,4000-4099", { fetchImpl: origin, persist });
+  eq(network.length === 0 && same(reloaded.body, first.body) && reloaded.reused === 1636 && reloaded.fetched === 0, true,
+    "and after a reload are answered from there, counted as reused, with nothing fetched");
+  network.length = 0;
+  const wider = await sharedFetch(new ByteStore(), url, "bytes=64-1599,2000-2099", { fetchImpl: origin, persist });
+  eq(JSON.stringify(network) === JSON.stringify(["bytes=2000-2099"]) && same(parseByteranges(wider.body)[1][1], file.slice(2000, 2100)), true,
+    "a request partly kept fetches only the rest");
+  kept.set(`${url} 4000-4099`, file.slice(0, 10));
+  network.length = 0;
+  const short = await sharedFetch(new ByteStore(), url, "bytes=4000-4099", { fetchImpl: origin, persist });
+  eq(network.length === 1 && same(short.body, file.slice(4000, 4100)), true, "an entry of the wrong length is not trusted");
+  eq(cachePersist(), null, "with no Cache Storage (a page from a file, or here) nothing is kept");
 }
 
 function checkSchedules() {
@@ -2692,6 +2716,8 @@ async function checkPythonTab(browser) {
         + "    print(f\"step {i} {m.activity()!r} {m.decay_heat()!r} {m.contact_dose()!r}\")\n";
       out = await runCode(script);
       eq(/^Finished/.test(await status()), true, `the form's script runs (${await status()})`);
+      const keptRanges = await page.evaluate(async () => (await (await caches.open("yani-online-data")).keys()).length);
+      eq(keptRanges > 0, true, `the ranges downloaded are kept in Cache Storage for the next visit (${keptRanges})`);
       const scriptSteps = [...out.matchAll(/^step \d+ (\S+) (\S+) (\S+)$/gm)].map((m) => m.slice(1).map(Number));
       const peak = Math.max(0, ...scriptSteps.map(([activity]) => activity));
       eq(peak > 0, true, `peak activity ${peak.toExponential(4)} Bq`);
