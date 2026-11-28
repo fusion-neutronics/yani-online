@@ -356,7 +356,18 @@ async function bootPlotly() {
 const dataStore = new ByteStore();
 /// And what both downloaded before, kept across reloads (see `cachePersist`).
 const dataPersist = cachePersist();
-window.yaniSharedFetch = (url, range, target) => sharedFetch(dataStore, url, range, { target, persist: dataPersist });
+/// A release's file is `<ORIGIN>/<library>/<release>/<kind>/<Name>.arrow/<section>`,
+/// and is only asked for while that release is the library's current one, so
+/// what the browser kept of the library's other releases can go.
+function pruneOtherReleases(url) {
+  if (!dataPersist || !url.startsWith(`${ORIGIN}/`)) return;
+  const [library, release, ...rest] = url.slice(ORIGIN.length + 1).split("?")[0].split("/");
+  if (rest.length >= 3) dataPersist.prune(`${ORIGIN}/${library}/`, `${ORIGIN}/${library}/${release}/`);
+}
+window.yaniSharedFetch = (url, range, target) => {
+  pruneOtherReleases(url);
+  return sharedFetch(dataStore, url, range, { target, persist: dataPersist });
+};
 /// Bytes this run's requests were answered from the store, for the status.
 let reusedBytes = 0;
 
@@ -384,6 +395,7 @@ async function fetchAll(jobs, onProgress, limit = 12) {
       const job = jobs[i];
       let body = null;
       try {
+        pruneOtherReleases(job.url);
         const resp = await sharedFetch(dataStore, job.url, job.range ? rangeHeader(job.range) : null, { persist: dataPersist });
         job.status = resp.status;
         reusedBytes += resp.reused;

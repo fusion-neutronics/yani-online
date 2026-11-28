@@ -238,8 +238,10 @@ export class ByteStore {
 /// entry that one request at a time can fill. With the wheel's requests split
 /// into single ranges, iron's Python run after a reload still sent two thirds
 /// of its requests to the network, and took anywhere from 8 s to 159 s. The release's files are
-/// immutable, named by release, so an entry never goes stale; the browser
-/// drops them under storage pressure, which costs only a download again.
+/// immutable, named by release, so an entry never goes stale; `prune` drops a
+/// library's other releases once a request shows which one is current, and the
+/// browser drops entries under storage pressure, which costs only a download
+/// again.
 export function cachePersist(name = "yani-online-data") {
   if (typeof caches === "undefined") return null;
   let opened = null;
@@ -251,6 +253,7 @@ export function cachePersist(name = "yani-online-data") {
     .then(async (cache) => new Set(cache ? (await cache.keys()).map((request) => request.url) : []))
     .catch(() => new Set()));
   const key = (url, [first, last]) => `${url}?bytes=${first}-${last}`;
+  const pruned = new Set();
   return {
     async get(url, range) {
       try {
@@ -266,6 +269,20 @@ export function cachePersist(name = "yani-online-data") {
       const k = key(url, range);
       held().then((keys) => keys.add(k)).catch(() => {});
       open().then((cache) => cache && cache.put(k, new Response(bytes))).catch(() => {});
+    },
+    /// Drop every entry under `prefix` but those under `current`, once per
+    /// prefix: what was kept of a library's earlier releases.
+    prune(prefix, current) {
+      if (pruned.has(prefix)) return;
+      pruned.add(prefix);
+      Promise.all([open(), held()]).then(([cache, keys]) => {
+        for (const k of keys) {
+          if (k.startsWith(prefix) && !k.startsWith(current)) {
+            keys.delete(k);
+            if (cache) cache.delete(k).catch(() => {});
+          }
+        }
+      }).catch(() => {});
     },
   };
 }
