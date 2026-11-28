@@ -706,6 +706,26 @@ async function checkByteStore() {
   const short = await sharedFetch(new ByteStore(), url, "bytes=4000-4099", { fetchImpl: origin, persist });
   eq(network.length === 1 && same(short.body, file.slice(4000, 4100)), true, "an entry of the wrong length is not trusted");
   eq(cachePersist(), null, "with no Cache Storage (a page from a file, or here) nothing is kept");
+
+  // Pruning, against a stand-in for Cache Storage.
+  const old = "https://o/lib/r1/neutron/Fe56.arrow/s?bytes=0-9";
+  const entries = new Set([old, "https://o/lib/r2/neutron/Fe56.arrow/s?bytes=0-9", "https://o/lib-b/r1/neutron/H1.arrow/s?bytes=0-9"]);
+  globalThis.caches = {
+    open: async () => ({ keys: async () => [...entries].map((u) => ({ url: u })), delete: async (k) => entries.delete(k) }),
+  };
+  try {
+    const pruning = cachePersist("test");
+    pruning.prune("https://o/lib/", "https://o/lib/r2/");
+    await new Promise((r) => setTimeout(r, 10));
+    eq([...entries].join(" "), "https://o/lib/r2/neutron/Fe56.arrow/s?bytes=0-9 https://o/lib-b/r1/neutron/H1.arrow/s?bytes=0-9",
+      "pruning drops the library's other releases, and keeps its current one and other libraries");
+    entries.add(old);
+    pruning.prune("https://o/lib/", "https://o/lib/r2/");
+    await new Promise((r) => setTimeout(r, 10));
+    eq(entries.has(old), true, "once per library a page");
+  } finally {
+    delete globalThis.caches;
+  }
 }
 
 function checkSchedules() {
@@ -2718,6 +2738,31 @@ async function checkPythonTab(browser) {
       eq(/^Finished/.test(await status()), true, `the form's script runs (${await status()})`);
       const keptRanges = await page.evaluate(async () => (await (await caches.open("yani-online-data")).keys()).length);
       eq(keptRanges > 0, true, `the ranges downloaded are kept in Cache Storage for the next visit (${keptRanges})`);
+      // The next visit drops what it kept of the library's other releases: a
+      // page that asks for a file of the current release, here from what the
+      // browser kept, deletes an entry planted for an older one.
+      const keys = await page.evaluate(async () => (await (await caches.open("yani-online-data")).keys()).map((r) => r.url));
+      const sample = keys.find((k) => /^https:\/\/yamc-data\.xsplot\.com\/[^/]+\/[^/]+\/[^/]+\/[^/]+\/[^/?]+\?bytes=\d+-\d+$/.test(k));
+      if (!sample) {
+        fail(`no kept range of a release's file to prune around (${keys[0]})`);
+      } else {
+        const planted = sample.replace(/^(https:\/\/yamc-data\.xsplot\.com\/[^/]+\/)[^/]+\//, "$1an-older-release/");
+        await page.evaluate(async (k) => (await caches.open("yani-online-data")).put(k, new Response("x")), planted);
+        const next = await page.context().newPage();
+        await next.goto(page.url());
+        await next.waitForFunction(() => window.yaniSharedFetch);
+        const [url, range] = sample.split("?");
+        const answer = await next.evaluate(([u, r]) => window.yaniSharedFetch(u, r, u).then((a) => a.status), [url, range]);
+        let left = [];
+        for (let t = 0; t < 50; t++) {
+          left = await next.evaluate(async () => (await (await caches.open("yani-online-data")).keys()).map((r) => r.url));
+          if (!left.includes(planted)) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        eq(answer === 206 && !left.includes(planted) && left.length === keys.length, true,
+          `the next visit drops the entries of the library's other releases, and keeps the current one's (${left.length} of ${keys.length} kept)`);
+        await next.close();
+      }
       const scriptSteps = [...out.matchAll(/^step \d+ (\S+) (\S+) (\S+)$/gm)].map((m) => m.slice(1).map(Number));
       const peak = Math.max(0, ...scriptSteps.map(([activity]) => activity));
       eq(peak > 0, true, `peak activity ${peak.toExponential(4)} Bq`);
